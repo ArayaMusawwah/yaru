@@ -19,31 +19,27 @@ pub fn scan_encoded(text: &str) -> Vec<DecodedPayload> {
                 && clean
                     .chars()
                     .all(|ch| ch.is_ascii_alphanumeric() || ch == '+' || ch == '/' || ch == '=')
+                && let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(clean)
+                && let Ok(decoded) = String::from_utf8(bytes)
+                && decoded
+                    .chars()
+                    .all(|ch| !ch.is_control() || ch == '\n' || ch == '\r' || ch == '\t')
             {
-                if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(clean) {
-                    if let Ok(decoded) = String::from_utf8(bytes) {
-                        if decoded
-                            .chars()
-                            .all(|ch| !ch.is_control() || ch == '\n' || ch == '\r' || ch == '\t')
-                        {
-                            results.push(DecodedPayload {
-                                encoding: "base64",
-                                decoded,
-                                line: index + 1,
-                            });
-                        }
-                    }
-                }
-            }
-        }
-        if line.contains("\\x") {
-            if let Some(decoded) = decode_hex_escapes(line) {
                 results.push(DecodedPayload {
-                    encoding: "hex-escape",
+                    encoding: "base64",
                     decoded,
                     line: index + 1,
                 });
             }
+        }
+        if line.contains("\\x")
+            && let Some(decoded) = decode_hex_escapes(line)
+        {
+            results.push(DecodedPayload {
+                encoding: "hex-escape",
+                decoded,
+                line: index + 1,
+            });
         }
     }
     results
@@ -55,16 +51,18 @@ fn decode_hex_escapes(input: &str) -> Option<String> {
     let mut i = 0;
     let mut found_hex = false;
     while i < bytes.len() {
-        if i + 3 < bytes.len() && bytes[i] == b'\\' && bytes[i + 1] == b'x' {
-            if let Ok(byte) = u8::from_str_radix(
+        if i + 3 < bytes.len()
+            && bytes[i] == b'\\'
+            && bytes[i + 1] == b'x'
+            && let Ok(byte) = u8::from_str_radix(
                 std::str::from_utf8(&bytes[i + 2..i + 4]).unwrap_or_default(),
                 16,
-            ) {
-                result.push(byte);
-                i += 4;
-                found_hex = true;
-                continue;
-            }
+            )
+        {
+            result.push(byte);
+            i += 4;
+            found_hex = true;
+            continue;
         }
         result.push(bytes[i]);
         i += 1;

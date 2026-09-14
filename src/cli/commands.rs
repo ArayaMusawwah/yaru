@@ -173,19 +173,37 @@ async fn analyze_dir(
     };
 
     let mut maintainer_changes = Vec::new();
+    let mut breakdown = ScoreBreakdown::default();
+
     if let Ok(db) = open_db() {
         if let Ok(Some(prev)) = db.latest_snapshot(&snapshot.package_name) {
             if let Some(change) = crate::core::maintainer::detect_change(&prev, &snapshot) {
                 maintainer_changes.push(change);
             }
+
+            // Phase 2: Analyze dependency changes against previous snapshot
+            let dep_graph = crate::core::dependency::analyze_dependencies(
+                package,
+                &snapshot.depends,
+                &snapshot.makedepends,
+                Some(&prev.depends),
+                |_| false,
+            );
+            breakdown.dependency_score = dep_graph.risk_score;
         }
+
+        // Phase 2: Check threat intelligence IOCs for sources
+        let ioc_engine = crate::core::threatintel::ThreatIntelEngine::new(&db);
+        let matches = ioc_engine.match_candidates(&snapshot.source_urls);
+        breakdown.threat_score = ioc_engine.calculate_score(&matches);
+
         let _ = db.save_snapshot(&snapshot);
     }
 
     let report = policy.evaluate(
         package,
         TrustZone::Aur,
-        &ScoreBreakdown::default(),
+        &breakdown,
         &analysis.findings,
         &maintainer_changes,
     );

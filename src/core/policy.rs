@@ -8,6 +8,12 @@ pub struct PolicyEngine {
     whitelisted_rules: Vec<String>,
 }
 
+impl Default for PolicyEngine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PolicyEngine {
     pub fn new() -> Self {
         Self {

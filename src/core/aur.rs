@@ -96,6 +96,12 @@ pub struct AurClient {
     base_url: String,
 }
 
+impl Default for AurClient {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AurClient {
     pub fn new() -> Self {
         Self::with_base_url("https://aur.archlinux.org")

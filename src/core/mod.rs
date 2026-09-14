@@ -1,15 +1,21 @@
 pub mod analyzer;
 pub mod aur;
 pub mod classifier;
+pub mod dependency;
+pub mod diff;
 pub mod maintainer;
 pub mod policy;
 pub mod risk;
+pub mod threatintel;
 pub mod types;
 
 pub use analyzer::{AnalyzerError, PkgbuildAnalysis, Rule, RuleSet, analyze_pkgbuild_dir};
 pub use aur::{AurClient, AurError, AurPackage};
 pub use classifier::{ClassifyError, classify, classify_local_pkgbuild, zone_for_repo};
+pub use dependency::{DependencyGraph, analyze_dependencies, clean_dep_name};
+pub use diff::{PkgbuildDiff, diff_pkgbuild_text};
 pub use maintainer::{change_score, detect_change};
 pub use policy::PolicyEngine;
 pub use risk::{assess, decide, explain};
+pub use threatintel::{IocMatch, ThreatIntelEngine};
 pub use types::*;

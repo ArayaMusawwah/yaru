@@ -60,10 +60,11 @@ fn local_repo_for_in(root: &Path, package: &str) -> Option<String> {
 
     let entries = std::fs::read_dir(root.join("local")).ok()?;
     for entry in entries.flatten() {
-        if let Some((name, repo)) = desc_metadata(&entry.path()) {
-            if name == package && repos.contains(&repo) {
-                return Some(repo);
-            }
+        if let Some((name, repo)) = desc_metadata(&entry.path())
+            && name == package
+            && repos.contains(&repo)
+        {
+            return Some(repo);
         }
     }
     None
