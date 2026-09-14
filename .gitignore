@@ -1,2 +1,24 @@
+# Rust build artifacts
 /target
-Cargo.lock
+**/*.rs.bk
+
+# NOTE: Cargo.lock is intentionally NOT ignored. yaru is a binary crate that
+# the Arch PKGBUILD builds with --locked/--frozen; shipping the lockfile is what
+# makes the AUR build reproducible.
+
+# IDE and editors
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS artifacts
+.DS_Store
+Thumbs.db
+
+# Local tooling / runtime state
+.mimocode/
+*.db-journal
+*.db-wal
+*.db-shm
