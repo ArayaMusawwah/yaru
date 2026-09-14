@@ -1,0 +1,189 @@
+- id: remote-shell-download
+  name: Remote Shell Download
+  description: Downloads content and pipes it into a shell interpreter, enabling arbitrary code execution
+  category: remote-execution
+  severity: critical
+  pattern: ""
+  contains_all: []
+  enabled: true
+  score: 50
+
+- id: obfuscated-base64
+  name: Base64 Obfuscation
+  description: Uses base64 decoding to hide payload content from review
+  category: obfuscation
+  severity: high
+  pattern: "base64 -d"
+  contains_all: []
+  enabled: true
+  score: 35
+
+- id: obfuscated-hex-escape
+  name: Hex Escape Obfuscation
+  description: Contains hex escape sequences that may hide malicious strings
+  category: obfuscation
+  severity: high
+  pattern: "\\x"
+  contains_all: []
+  enabled: true
+  score: 35
+
+- id: eval-invocation
+  name: Eval Invocation
+  description: Uses eval to execute dynamically constructed commands
+  category: suspicious-interpreter
+  severity: high
+  pattern: "eval "
+  contains_all: []
+  enabled: true
+  score: 30
+
+- id: bash-c-invocation
+  name: Bash -c Invocation
+  description: Spawns a shell with inline command string
+  category: suspicious-interpreter
+  severity: medium
+  pattern: "bash -c"
+  contains_all: []
+  enabled: true
+  score: 20
+
+- id: python-c-invocation
+  name: Python -c Invocation
+  description: Executes inline Python code which can perform arbitrary actions
+  category: suspicious-interpreter
+  severity: medium
+  pattern: "python -c"
+  contains_all: []
+  enabled: true
+  score: 20
+
+- id: perl-e-invocation
+  name: Perl -e Invocation
+  description: Executes inline Perl code which can perform arbitrary actions
+  category: suspicious-interpreter
+  severity: medium
+  pattern: "perl -e"
+  contains_all: []
+  enabled: true
+  score: 20
+
+- id: systemd-persistence
+  name: Systemd Unit Creation
+  description: Creates or installs systemd service units for persistence
+  category: persistence
+  severity: high
+  pattern: ""
+  contains_all: ["systemctl", "enable"]
+  enabled: true
+  score: 30
+
+- id: cron-persistence
+  name: Crontab Write
+  description: Writes to crontab for scheduled persistence
+  category: persistence
+  severity: high
+  pattern: "crontab"
+  contains_all: []
+  enabled: true
+  score: 30
+
+- id: sudoers-write
+  name: Sudoers Modification
+  description: Modifies sudoers to escalate privileges persistently
+  category: persistence
+  severity: critical
+  pattern: "/etc/sudoers"
+  contains_all: []
+  enabled: true
+  score: 50
+
+- id: shell-rc-modification
+  name: Shell RC Modification
+  description: Modifies shell startup files for persistence
+  category: persistence
+  severity: high
+  pattern: ".bashrc"
+  contains_all: []
+  enabled: true
+  score: 30
+
+- id: credential-access-ssh
+  name: SSH Key Access
+  description: Accesses SSH private key directory
+  category: credential-access
+  severity: critical
+  pattern: ".ssh"
+  contains_all: []
+  enabled: true
+  score: 45
+
+- id: credential-access-gnupg
+  name: GnuPG Key Access
+  description: Accesses GnuPG keyring directory
+  category: credential-access
+  severity: high
+  pattern: ".gnupg"
+  contains_all: []
+  enabled: true
+  score: 35
+
+- id: credential-access-shadow
+  name: Shadow File Access
+  description: Reads the system shadow password file
+  category: credential-access
+  severity: critical
+  pattern: "/etc/shadow"
+  contains_all: []
+  enabled: true
+  score: 50
+
+- id: setuid-manipulation
+  name: SetUID/SetGID Manipulation
+  description: Sets SUID or SGID bits which can be used for privilege escalation
+  category: privilege-escalation
+  severity: critical
+  pattern: "chmod u+s"
+  contains_all: []
+  enabled: true
+  score: 50
+
+- id: setgid-manipulation
+  name: SetGID Manipulation
+  description: Sets SGID bits on files
+  category: privilege-escalation
+  severity: high
+  pattern: "chmod g+s"
+  contains_all: []
+  enabled: true
+  score: 35
+
+- id: network-fetch-in-build
+  name: Unexpected Network Fetch in Build
+  description: Build function performs network requests which should only happen in source array
+  category: network
+  severity: medium
+  pattern: ""
+  contains_all: []
+  enabled: true
+  score: 25
+
+- id: obfuscated-payload
+  name: Obfuscated Payload Detected
+  description: A decoded obfuscated payload triggered additional security rules
+  category: obfuscation
+  severity: critical
+  pattern: ""
+  contains_all: []
+  enabled: true
+  score: 50
+
+- id: exec-invocation
+  name: Exec Invocation
+  description: Uses exec to replace the current process with another command
+  category: suspicious-interpreter
+  severity: medium
+  pattern: "exec "
+  contains_all: []
+  enabled: true
+  score: 20
