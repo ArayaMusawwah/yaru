@@ -14,14 +14,148 @@ use crate::cli::Command;
 pub async fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Command::Status => status(),
-        Command::Inspect { package } => inspect(&package, false).await,
-        Command::Audit { package } => inspect(&package, true).await,
+        Command::Inspect { package } => inspect(&package, false).await.map(|_| ()),
+        Command::Audit { package } => inspect(&package, true).await.map(|_| ()),
         Command::Explain { package } => explain(&package),
         Command::History { package } => history(&package),
         Command::Trust { package } => trust(&package).await,
         Command::AllowRule { rule } => allow_rule(&rule),
         Command::InspectLocal { dir } => inspect_local(Path::new(&dir), true).await,
         Command::Sandbox { dir, command } => sandbox_run(&dir, &command).await,
+        Command::Gateway { dry_run, args } => gateway(dry_run, &args).await,
+    }
+}
+
+/// Phase 5 gateway: evaluate `paru -S` targets through Yaru, then forward the
+/// original arguments to the REAL paru binary. Opt-in and explicit — Yaru
+/// never wraps paru by itself.
+async fn gateway(dry_run: bool, args: &[String]) -> Result<()> {
+    use crate::core::types::Verdict;
+    use crate::interceptor::{GatewayAction, GatewayDecision, find_real_paru, parse_gateway_args};
+    use std::process::Command as StdCommand;
+
+    let real =
+        find_real_paru().ok_or_else(|| anyhow!("real paru binary not found at /usr/bin/paru"))?;
+
+    match parse_gateway_args(args) {
+        GatewayAction::Forward => {
+            if dry_run {
+                println!(
+                    "  [dry-run] non-install operation; would forward to {}",
+                    real.display()
+                );
+                return Ok(());
+            }
+            let status = StdCommand::new(&real).args(args).status()?;
+            std::process::exit(status.code().unwrap_or(1));
+        }
+        GatewayAction::EvaluateInstall { packages, .. } => {
+            let cfg = config::load();
+            let policy =
+                crate::core::policy::PolicyEngine::with_whitelist(cfg.whitelisted_rules.clone());
+            let aur = AurClient::new();
+            let mut decision = GatewayDecision::new();
+
+            for pkg in &packages {
+                let classification = crate::core::classifier::classify(pkg, &aur)
+                    .await
+                    .map_err(|e| anyhow!("classification failed for {pkg}: {e}"))?;
+
+                // Zone 0 fast path: no AUR pipeline, zero overhead. Every other
+                // zone is scored through the policy engine — never auto-allowed.
+                if classification.zone != TrustZone::Aur {
+                    let report = policy.evaluate(
+                        pkg,
+                        classification.zone,
+                        &ScoreBreakdown::default(),
+                        &[],
+                        &[],
+                    );
+                    output::print_report_card(&report);
+                    decision.record(
+                        pkg,
+                        classification.zone,
+                        report.verdict,
+                        report.reasons.join("; "),
+                    );
+                    continue;
+                }
+
+                let dir = fetch_aur_snapshot(pkg, classification.url_path.as_deref()).await?;
+                let rules = crate::core::analyzer::RuleSet::builtin();
+                let analysis = crate::core::analyzer::analyze_pkgbuild_dir(&dir, &rules)
+                    .map_err(|e| anyhow!("analysis failed for {pkg}: {e}"))?;
+                let snapshot = crate::core::types::PackageSnapshot {
+                    package_name: analysis.package_name.clone().unwrap_or_else(|| pkg.clone()),
+                    version: analysis.version.clone(),
+                    maintainer: classification.maintainer.clone(),
+                    pkgbuild_hash: analysis.pkgbuild_hash.clone(),
+                    source_urls: analysis.source_urls.clone(),
+                    depends: analysis.depends.clone(),
+                    makedepends: analysis.makedepends.clone(),
+                    checkdepends: analysis.checkdepends.clone(),
+                    timestamp: chrono::Utc::now().timestamp(),
+                };
+
+                let mut maintainer_changes = Vec::new();
+                if let Ok(db) = open_db() {
+                    if let Ok(Some(prev)) = db.latest_snapshot(&snapshot.package_name) {
+                        if let Some(change) =
+                            crate::core::maintainer::detect_change(&prev, &snapshot)
+                        {
+                            maintainer_changes.push(change);
+                        }
+                    }
+                    let _ = db.save_snapshot(&snapshot);
+                }
+
+                let report = policy.evaluate(
+                    pkg,
+                    TrustZone::Aur,
+                    &ScoreBreakdown::default(),
+                    &analysis.findings,
+                    &maintainer_changes,
+                );
+                output::print_report_card(&report);
+                decision.record(
+                    pkg,
+                    TrustZone::Aur,
+                    report.verdict,
+                    report.reasons.join("; "),
+                );
+            }
+
+            println!();
+            if !decision.fast_path_packages.is_empty() {
+                println!(
+                    "  {} fast path (official zone): {}",
+                    "[OK]".green(),
+                    decision.fast_path_packages.join(", ")
+                );
+            }
+            for (pkg, reason) in &decision.warnings {
+                println!("  {} {pkg}: {reason}", "[!]".yellow());
+            }
+
+            if !decision.proceed {
+                for (pkg, reason) in &decision.blocked_packages {
+                    println!("  {} {pkg} BLOCKED: {reason}", "[X]".red());
+                }
+                anyhow::bail!("yaru gateway refused to forward: blocked package(s) present");
+            }
+
+            if dry_run {
+                println!(
+                    "\n  [dry-run] would forward to {}: {}",
+                    real.display(),
+                    args.join(" ")
+                );
+                return Ok(());
+            }
+
+            let status = StdCommand::new(&real).args(args).status()?;
+            std::process::exit(status.code().unwrap_or(1));
+        }
     }
 }
 

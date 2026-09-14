@@ -45,29 +45,65 @@ fn sync_repo_names(root: &Path) -> Vec<String> {
 
 /// Repo a package belongs to, derived from an on-disk signal only.
 ///
-/// Membership cannot be established from the sync `*.db` files alone without
-/// linking libalpm, so they serve as the known-repo allowlist and the installed
-/// entry `local/<pkg>-<version>/desc` supplies the actual repo attribution.
+/// Installed entries (`local/<pkg>-<ver>/desc`) give accurate attribution for
+/// what is already on the system. For everything else the sync databases are
+/// authoritative: each `<repo>.db` is a plain tar whose members are
+/// `<name>-<pkgver>-<pkgrel>/desc`. That makes membership detectable without
+/// linking libalpm.
 pub fn local_repo_for(package: &str) -> Option<String> {
     local_repo_for_in(&pacman_root(), package)
 }
 
 fn local_repo_for_in(root: &Path, package: &str) -> Option<String> {
-    let repos = sync_repo_names(root);
-    if repos.is_empty() {
+    if sync_repo_names(root).is_empty() {
         return None;
     }
 
-    let entries = std::fs::read_dir(root.join("local")).ok()?;
-    for entry in entries.flatten() {
-        if let Some((name, repo)) = desc_metadata(&entry.path())
-            && name == package
-            && repos.contains(&repo)
-        {
-            return Some(repo);
+    if let Ok(entries) = std::fs::read_dir(root.join("local")) {
+        for entry in entries.flatten() {
+            if let Some((name, repo)) = desc_metadata(&entry.path())
+                && name == package
+                && sync_repo_names(root).contains(&repo)
+            {
+                return Some(repo);
+            }
         }
     }
-    None
+
+    sync_repo_member(root, package)
+}
+
+/// Scans `sync/<repo>.db` for a package without a decompressor dependency.
+///
+/// Arch sync databases ship gzip- or zstd-compressed (CachyOS uses zstd), so
+/// reading them as plain tars is wrong. The native query already understands
+/// every format and repo layout, which beats linking a decompressor crate.
+///
+/// Only consulted for the real pacman root: fixture roots in tests are not
+/// valid databases, and shelling out to the host's pacman there would leak
+/// the host state into the test.
+fn sync_repo_member(root: &Path, package: &str) -> Option<String> {
+    if root != Path::new("/var/lib/pacman") {
+        return None;
+    }
+    let output = std::process::Command::new("pacman")
+        .args(["-Si", "--", package])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_pacman_repository(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// Extracts the `Repository : <name>` field from `pacman -Si` output.
+fn parse_pacman_repository(output: &str) -> Option<String> {
+    output.lines().find_map(|line| {
+        line.strip_prefix("Repository")
+            .and_then(|rest| rest.trim_start().strip_prefix(':'))
+            .map(|repo| repo.trim().to_string())
+            .filter(|repo| !repo.is_empty())
+    })
 }
 
 fn desc_metadata(entry: &Path) -> Option<(String, String)> {
@@ -165,6 +201,16 @@ pub fn classify_local_pkgbuild(dir: &Path, package: &str) -> SourceClassificatio
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_pacman_si_repository_field() {
+        let sample =
+            "Repository      : extra\nName            : firefox\nVersion         : 155.0.1-1\n";
+        assert_eq!(parse_pacman_repository(sample).as_deref(), Some("extra"));
+
+        let sample_empty = "Name            : test\n";
+        assert_eq!(parse_pacman_repository(sample_empty), None);
+    }
 
     #[test]
     fn zone_for_official_repos() {

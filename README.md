@@ -232,7 +232,7 @@ Verification covers:
 - [x] **Phase 1: Foundation & MVP** (CLI, Static Scanner, SQLite Snapshots, Risk/Policy Engine)
 - [x] **Phase 2: Supply-Chain Depth** (Transitive Dependency Graph, PKGBUILD Diff, Threat Intel IOCs)
 - [x] **Phase 3: Sandbox Builder** (Bubblewrap containment, filesystem mask, network policy)
-- [x] **Phase 4: Behavioral IDS** (Process tree tracking, DNS & socket monitoring, dynamic risk re-evaluation)
+- [x] **Phase 4: Behavioral IDS** (Output-based runtime heuristics, exfiltration/privilege pattern detection, JSONL events)
 - [ ] **Phase 5: Paru Gateway** (Transparent interceptor shim, `makepkg` pre-exec hook)
 
 ---
