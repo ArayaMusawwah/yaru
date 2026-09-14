@@ -56,12 +56,18 @@ async fn build(dir: &str, dry_run: bool) -> Result<()> {
                 report.verdict.label()
             );
         }
-        Verdict::Warn => {
-            println!(
-                "\n  {} risk elevated — continuing because policy allows WARN through",
-                "[!]".yellow()
-            );
-        }
+        Verdict::Warn => match cfg.policy.on_warn {
+            crate::config::WarnAction::Continue => {
+                println!(
+                    "\n  {} risk elevated — continuing (on_warn = continue)",
+                    "[!]".yellow()
+                );
+            }
+            crate::config::WarnAction::Block => {
+                output::print_reasons(&report.reasons);
+                anyhow::bail!("yaru build refused: verdict WARN with policy on_warn = block");
+            }
+        },
         Verdict::Allow => {}
     }
 
@@ -220,6 +226,16 @@ async fn gateway(dry_run: bool, args: &[String]) -> Result<()> {
             }
             for (pkg, reason) in &decision.warnings {
                 println!("  {} {pkg}: {reason}", "[!]".yellow());
+            }
+
+            // WARN honors policy: non-interactive gateway cannot ask, so
+            // on_warn = block refuses the whole batch.
+            if !decision.warnings.is_empty()
+                && cfg.policy.on_warn == crate::config::WarnAction::Block
+            {
+                anyhow::bail!(
+                    "yaru gateway refused: WARN verdict(s) present with policy on_warn = block"
+                );
             }
 
             if !decision.proceed {

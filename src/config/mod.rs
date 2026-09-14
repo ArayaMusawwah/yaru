@@ -13,10 +13,25 @@ pub struct YaruConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PolicyConfig {
     pub on_engine_failure: crate::core::types::FailureMode,
+    /// What to do when the risk verdict is WARN (medium risk). Non-interactive
+    /// callers cannot prompt, so `Block` is the safe default.
+    #[serde(default)]
+    pub on_warn: WarnAction,
     /// Thresholds on the 0-100 composite score.
     pub allow_below: u32,
     pub warn_below: u32,
     pub quarantine_below: u32,
+}
+
+/// Response to a WARN verdict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum WarnAction {
+    /// Proceed, but print the warnings.
+    Continue,
+    /// Refuse to proceed. Safe default: WARN is elevated risk and no
+    /// interactive approval path exists yet.
+    #[default]
+    Block,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -36,6 +51,7 @@ impl Default for YaruConfig {
         Self {
             policy: PolicyConfig {
                 on_engine_failure: crate::core::types::FailureMode::Warn,
+                on_warn: WarnAction::Block,
                 allow_below: 30,
                 warn_below: 60,
                 quarantine_below: 80,
