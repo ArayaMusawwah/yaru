@@ -40,4 +40,20 @@ pub enum Command {
         #[arg(default_value = "/usr/bin/true", num_args = 1.., trailing_var_arg = true)]
         command: Vec<String>,
     },
+    /// Evaluate a PKGBUILD directory, then build it inside the sandbox
+    Build {
+        dir: String,
+        /// Evaluate and report only; never invoke makepkg
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Evaluate `paru -S` targets, then forward to the real paru binary
+    Gateway {
+        /// Evaluate and report only; never execute paru
+        #[arg(long)]
+        dry_run: bool,
+        /// Arguments as they would be passed to paru (e.g. -S pkg1 pkg2)
+        #[arg(num_args = 1.., trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
 }

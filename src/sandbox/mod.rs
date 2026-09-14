@@ -45,6 +45,10 @@ impl Sandbox {
             "--ro-bind".into(),
             "/usr".into(),
             "/usr".into(),
+            // makepkg reads /etc/makepkg.conf; /etc is read-only, never writable.
+            "--ro-bind".into(),
+            "/etc".into(),
+            "/etc".into(),
             // Arch symlinks: /bin /lib /lib64 -> usr/*
             "--symlink".into(),
             "usr/bin".into(),

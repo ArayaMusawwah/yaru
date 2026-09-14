@@ -2,6 +2,7 @@ use crate::core::types::{Finding, Severity};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+use std::sync::OnceLock;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BehaviorEvent {
@@ -21,73 +22,106 @@ pub struct BehaviorReport {
     pub suspicious: bool,
 }
 
-struct BehaviorRule {
-    id: &'static str,
-    title: &'static str,
-    category: &'static str,
-    severity: Severity,
+/// Rule definitions mirror the PKGBUILD rule engine (architecture §31):
+/// signatures live in YAML and update without recompiling the binary.
+#[derive(Debug, Clone, Deserialize)]
+struct RuleDef {
+    id: String,
+    name: String,
+    category: String,
+    severity: String,
+    /// Alternation string ("a|b|c"); split on '|' into substring needles.
+    pattern: String,
     score: u32,
-    needles: &'static [&'static str],
 }
 
-const RULES: &[BehaviorRule] = &[
-    BehaviorRule {
-        id: "dns-resolution-attempt",
-        title: "DNS or Host Resolution Attempt",
-        category: "network",
-        severity: Severity::High,
-        score: 30,
-        needles: &[
-            "temporary failure in name resolution",
-            "getaddrinfo",
-            "name or service not known",
-            "connection timed out",
-        ],
-    },
-    BehaviorRule {
-        id: "unexpected-network-binary",
-        title: "Network Tool Invoked",
-        category: "network",
-        severity: Severity::Critical,
-        score: 50,
-        needles: &["curl: ", "wget: ", "nc: ", "netcat"],
-    },
-    BehaviorRule {
-        id: "privilege-escalation-attempt",
-        title: "Privilege Escalation Attempt",
-        category: "privilege",
-        severity: Severity::Critical,
-        score: 50,
-        needles: &["sudo: ", "su: ", "operation not permitted", "setuid"],
-    },
-    BehaviorRule {
-        id: "suspicious-file-write",
-        title: "Write Outside Allowed Tree",
-        category: "filesystem",
-        severity: Severity::Medium,
-        score: 15,
-        needles: &["read-only file system", "permission denied"],
-    },
-];
+#[derive(Deserialize)]
+struct RuleFile {
+    rules: Vec<RuleDef>,
+}
+
+struct BehaviorRule {
+    id: String,
+    title: String,
+    category: String,
+    severity: Severity,
+    score: u32,
+    needles: Vec<String>,
+}
+
+fn parse_severity(s: &str) -> Severity {
+    match s.to_lowercase().as_str() {
+        "info" => Severity::Info,
+        "low" => Severity::Low,
+        "high" => Severity::High,
+        "critical" => Severity::Critical,
+        _ => Severity::Medium,
+    }
+}
+
+fn rules_from_yaml(yaml: &str) -> Vec<BehaviorRule> {
+    let defs: Vec<RuleDef> = serde_yaml::from_str::<RuleFile>(yaml)
+        .map(|file| file.rules)
+        .unwrap_or_default();
+    defs.into_iter()
+        .map(|d| BehaviorRule {
+            needles: d
+                .pattern
+                .split('|')
+                .map(|n| n.trim().to_lowercase())
+                .filter(|n| !n.is_empty())
+                .collect(),
+            id: d.id,
+            title: d.name,
+            category: d.category,
+            severity: parse_severity(&d.severity),
+            score: d.score,
+        })
+        .collect()
+}
+
+/// Built-in rules are compiled in so offline/first-run always works.
+const BUILTIN_YAML: &str = include_str!("../rules/behavior/behavior.yaml");
+
+fn load_rules() -> Vec<BehaviorRule> {
+    if let Ok(path) = std::env::var("YARU_BEHAVIOR_RULES") {
+        match std::fs::read_to_string(&path) {
+            Ok(text) => {
+                let parsed = rules_from_yaml(&text);
+                if !parsed.is_empty() {
+                    return parsed;
+                }
+                tracing::warn!("YARU_BEHAVIOR_RULES={path} yielded no rules; using builtin");
+            }
+            Err(_) => tracing::warn!("YARU_BEHAVIOR_RULES={path} unreadable; using builtin"),
+        }
+    }
+    rules_from_yaml(BUILTIN_YAML)
+}
+
+fn rules() -> &'static [BehaviorRule] {
+    static RULES: OnceLock<Vec<BehaviorRule>> = OnceLock::new();
+    RULES.get_or_init(load_rules)
+}
 
 pub fn scan_output(stdout: &str, stderr: &str) -> BehaviorReport {
     let combined = format!("{stdout}\n{stderr}");
     let mut report = BehaviorReport::default();
     for (index, line) in combined.lines().enumerate() {
         let lower = line.to_lowercase();
-        for rule in RULES {
+        for rule in rules() {
             if rule.needles.iter().any(|needle| lower.contains(needle)) {
                 report.findings.push(Finding {
-                    rule_id: rule.id.to_string(),
-                    title: rule.title.to_string(),
-                    category: rule.category.to_string(),
+                    rule_id: rule.id.clone(),
+                    title: rule.title.clone(),
+                    category: rule.category.clone(),
                     severity: rule.severity,
                     file: "sandbox-output".to_string(),
                     line: index + 1,
                     excerpt: line.trim().chars().take(160).collect(),
                 });
                 report.events.push(BehaviorEvent {
-                    event_type: rule.category.to_string(),
+                    event_type: rule.category.clone(),
                     process: None,
                     detail: line.trim().to_string(),
                     expected: false,
@@ -121,6 +155,34 @@ pub fn append_events(path: &Path, report: &BehaviorReport) -> Result<(), std::io
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn builtin_yaml_rules_load() {
+        let parsed = load_rules();
+        assert!(parsed.len() >= 4, "expected >=4 builtin rules");
+        assert!(parsed.iter().all(|r| !r.needles.is_empty()));
+        assert!(
+            parsed
+                .iter()
+                .any(|r| r.id == "dns-resolution-attempt" && r.severity == Severity::High)
+        );
+    }
+
+    #[test]
+    fn custom_yaml_is_parsed_without_env() {
+        let yaml = "rules:\n  - id: custom-marker\n    name: Custom Marker\n    category: test\n    severity: critical\n    pattern: \"marker-xyz|other-token\"\n    score: 99\n";
+        let parsed = rules_from_yaml(yaml);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].id, "custom-marker");
+        assert_eq!(parsed[0].score, 99);
+        assert_eq!(parsed[0].severity, Severity::Critical);
+        assert_eq!(parsed[0].needles.len(), 2);
+    }
+
+    #[test]
+    fn malformed_yaml_yields_no_rules_instead_of_panicking() {
+        assert!(rules_from_yaml("this: is: not: valid: yaml").is_empty());
+    }
 
     #[test]
     fn clean_build_output_has_no_behavior_findings() {
