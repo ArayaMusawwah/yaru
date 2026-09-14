@@ -44,7 +44,7 @@ async fn build(dir: &str, dry_run: bool) -> Result<()> {
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| "local".to_string());
 
-    let (report, _) = analyze_dir(path, &name, &policy, false).await?;
+    let (report, _) = analyze_dir(path, &name, None, &policy, false).await?;
     output::print_report_card(&report);
     output::print_findings(&report.findings);
 
@@ -422,7 +422,14 @@ async fn inspect(package: &str, deep: bool) -> Result<()> {
 
     let (report, _) = if classification.zone == TrustZone::Aur {
         let dir = fetch_aur_snapshot(package, classification.url_path.as_deref()).await?;
-        analyze_dir(&dir, package, &policy, deep).await?
+        analyze_dir(
+            &dir,
+            package,
+            classification.maintainer.clone(),
+            &policy,
+            deep,
+        )
+        .await?
     } else {
         let report = policy.evaluate(
             package,
@@ -459,7 +466,7 @@ async fn inspect_local(dir: &Path, deep: bool) -> Result<()> {
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| "local".to_string());
-    let (report, _) = analyze_dir(dir, &name, &policy, deep).await?;
+    let (report, _) = analyze_dir(dir, &name, None, &policy, deep).await?;
     output::print_report_card(&report);
     if deep {
         output::print_findings(&report.findings);
@@ -473,6 +480,7 @@ async fn inspect_local(dir: &Path, deep: bool) -> Result<()> {
 async fn analyze_dir(
     dir: &Path,
     package: &str,
+    maintainer: Option<String>,
     policy: &crate::core::policy::PolicyEngine,
     _deep: bool,
 ) -> Result<(crate::core::types::RiskReport, Option<PathBuf>)> {
@@ -486,7 +494,7 @@ async fn analyze_dir(
             .clone()
             .unwrap_or_else(|| package.to_string()),
         version: analysis.version.clone(),
-        maintainer: None,
+        maintainer,
         pkgbuild_hash: analysis.pkgbuild_hash.clone(),
         source_urls: analysis.source_urls.clone(),
         depends: analysis.depends.clone(),

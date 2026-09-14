@@ -1,0 +1,64 @@
+# Maintainer: Iqbal <root_iqbal@local>
+pkgname=yaru
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="AUR Supply-Chain Security Layer for Arch Linux (IDS/IPS)"
+arch=('x86_64')
+url="https://github.com/ArayaMusawwah/yaru"
+license=('MIT')
+depends=('bubblewrap' 'pacman')
+makedepends=('cargo')
+optdepends=(
+    'paru: for AUR package helper gateway integration'
+)
+backup=('etc/yaru/config.toml')
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+prepare() {
+    cd "$pkgname-$pkgver"
+    export RUSTUP_TOOLCHAIN=stable
+    cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+    cd "$pkgname-$pkgver"
+    export RUSTUP_TOOLCHAIN=stable
+    export CARGO_TARGET_DIR=target
+    CFLAGS+=" -ffat-lto-objects"
+    cargo build --release --frozen
+}
+
+check() {
+    cd "$pkgname-$pkgver"
+    export RUSTUP_TOOLCHAIN=stable
+    cargo test --frozen
+}
+
+package() {
+    cd "$pkgname-$pkgver"
+    install -Dm755 "target/release/$pkgname" "$pkgdir/usr/bin/$pkgname"
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+    install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+
+    # Default system configuration
+    install -d "$pkgdir/etc/yaru"
+    cat << 'EOF' > "$pkgdir/etc/yaru/config.toml"
+# Yaru system-wide defaults
+
+[policy]
+on_engine_failure = "Warn"
+on_warn = "Block"
+allow_below = 30
+warn_below = 60
+quarantine_below = 80
+
+[sandbox]
+network_mode = "Strict"
+
+whitelisted_rules = []
+EOF
+    chmod 644 "$pkgdir/etc/yaru/config.toml"
+
+    # Shell completions could be generated here in future phases
+}
