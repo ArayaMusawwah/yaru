@@ -117,3 +117,29 @@ fn test_cli_allow_rule_persists_in_config() {
     let content = fs::read_to_string(tmp.path().join("config.toml")).unwrap_or_default();
     assert!(content.contains("remote-shell-download"));
 }
+
+#[test]
+fn test_cli_sandbox_runs_clean_command() {
+    let tmp = tempdir().unwrap();
+    let mut cmd = Command::cargo_bin("yaru").unwrap();
+    cmd.arg("sandbox")
+        .arg(tmp.path().to_str().unwrap())
+        .arg("/usr/bin/true");
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("sandboxed command exited cleanly"));
+}
+
+#[test]
+fn test_cli_sandbox_network_is_blocked_by_default() {
+    let tmp = tempdir().unwrap();
+    let mut cmd = Command::cargo_bin("yaru").unwrap();
+    cmd.arg("sandbox")
+        .arg(tmp.path().to_str().unwrap())
+        .arg("/usr/bin/bash")
+        .arg("-c")
+        .arg("getent hosts aur.archlinux.org");
+    cmd.assert()
+        .failure()
+        .stdout(predicate::str::contains("sandboxed command FAILED"));
+}

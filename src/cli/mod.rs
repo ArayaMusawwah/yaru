@@ -33,4 +33,11 @@ pub enum Command {
     AllowRule { rule: String },
     /// Inspect a local PKGBUILD directory
     InspectLocal { dir: String },
+    /// Run a command inside an isolated bwrap sandbox for a PKGBUILD directory
+    Sandbox {
+        dir: String,
+        /// Command to execute inside the sandbox (defaults to /usr/bin/true)
+        #[arg(default_value = "/usr/bin/true", num_args = 1.., trailing_var_arg = true)]
+        command: Vec<String>,
+    },
 }

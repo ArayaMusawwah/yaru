@@ -21,6 +21,49 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::Trust { package } => trust(&package).await,
         Command::AllowRule { rule } => allow_rule(&rule),
         Command::InspectLocal { dir } => inspect_local(Path::new(&dir), true).await,
+        Command::Sandbox { dir, command } => sandbox_run(&dir, &command).await,
+    }
+}
+
+/// Executes a command inside the bubblewrap sandbox using the configured
+/// network mode. Reports isolation outcome and exit code to the user.
+async fn sandbox_run(dir: &str, command: &[String]) -> Result<()> {
+    use crate::sandbox::{Sandbox, SandboxResult};
+
+    if !Path::new(dir).is_dir() {
+        anyhow::bail!("directory not found: {dir}");
+    }
+    if !Sandbox::backend_available() {
+        anyhow::bail!("bubblewrap (bwrap) not found on this system");
+    }
+
+    let cfg = config::load();
+    let sb = Sandbox::new(cfg.sandbox.network_mode, dir);
+    let argv: Vec<&str> = command.iter().map(|s| s.as_str()).collect();
+
+    println!("  Sandbox mode : {:?}", cfg.sandbox.network_mode);
+    println!("  Workdir      : {dir}");
+    println!("  Command      : {}", argv.join(" "));
+    println!();
+
+    let r: SandboxResult = sb.run(&argv);
+    if !r.stdout.is_empty() {
+        println!("{}", r.stdout);
+    }
+    if !r.stderr.is_empty() {
+        eprintln!("{}", r.stderr.red());
+    }
+
+    if r.success {
+        println!("\n  {} sandboxed command exited cleanly", "[OK]".green());
+        Ok(())
+    } else {
+        println!(
+            "\n  {} sandboxed command FAILED (exit: {:?})",
+            "[X]".red(),
+            r.exit_code
+        );
+        anyhow::bail!("sandboxed command failed")
     }
 }
 
