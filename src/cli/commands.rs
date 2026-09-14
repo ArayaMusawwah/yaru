@@ -54,9 +54,44 @@ async fn sandbox_run(dir: &str, command: &[String]) -> Result<()> {
         eprintln!("{}", r.stderr.red());
     }
 
-    if r.success {
+    // Phase 4: Behavioral IDS. The sandbox output is the observable evidence of
+    // what the build actually attempted (DNS, privilege, filesystem).
+    let behavior = crate::monitor::scan_output(&r.stdout, &r.stderr);
+    let events_path = events_path();
+    if let Err(e) = crate::monitor::append_events(&events_path, &behavior) {
+        eprintln!("  warning: cannot write behavior events: {e}");
+    }
+
+    if behavior.suspicious {
+        println!(
+            "\n{}",
+            "── Behavior Findings ──────────────────────────────────────────".yellow()
+        );
+        for f in &behavior.findings {
+            println!(
+                "  [{}] line {} · {}",
+                f.severity.label(),
+                f.line,
+                f.title.bold()
+            );
+            println!("             {}", f.excerpt.dimmed());
+        }
+        println!(
+            "\n  Behavior score : {}/100  (evidence logged to {})",
+            behavior.score,
+            events_path.display()
+        );
+        println!(
+            "  {} dynamic risk raised — build behavior does not match declared sources",
+            "[!]".yellow()
+        );
+    }
+
+    if r.success && !behavior.suspicious {
         println!("\n  {} sandboxed command exited cleanly", "[OK]".green());
         Ok(())
+    } else if r.success {
+        anyhow::bail!("sandboxed command exited cleanly but behavior was suspicious")
     } else {
         println!(
             "\n  {} sandboxed command FAILED (exit: {:?})",
@@ -65,6 +100,16 @@ async fn sandbox_run(dir: &str, command: &[String]) -> Result<()> {
         );
         anyhow::bail!("sandboxed command failed")
     }
+}
+
+fn events_path() -> PathBuf {
+    if let Ok(p) = std::env::var("YARU_EVENTS_PATH") {
+        return PathBuf::from(p);
+    }
+    dirs::data_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("yaru")
+        .join("events.jsonl")
 }
 
 fn db_path() -> PathBuf {

@@ -1,0 +1,43 @@
+# Behavior rules: matched against stdout/stderr of a sandboxed build.
+# A sandboxed build has no network (Strict), so any resolution attempt
+# visible in output is an exfiltration/beacon attempt.
+rules:
+  - id: dns-resolution-attempt
+    name: DNS or Host Resolution Attempt
+    description: Build tried to resolve a hostname despite network isolation
+    category: network
+    severity: high
+    pattern: "Temporary failure in name resolution|getaddrinfo|Name or service not known|connection timed out"
+    score: 30
+
+  - id: unexpected-network-binary
+    name: Network Tool Invoked
+    description: curl/wget/nc invoked during build despite no declared need at this stage
+    category: network
+    severity: critical
+    pattern: "curl: |wget: |nc: |netcat"
+    score: 50
+
+  - id: interpreter-spawn
+    name: Interpreter Spawned Mid-Build
+    description: bash/sh/perl/python spawned unexpectedly beyond the build toolchain
+    category: process
+    severity: medium
+    pattern: "sh: |bash: |perl: |python: "
+    score: 15
+
+  - id: privilege-escalation-attempt
+    name: Privilege Escalation Attempt
+    description: sudo/su/setuid attempted inside sandbox
+    category: privilege
+    severity: critical
+    pattern: "sudo: |su: |Operation not permitted.*setuid|setuid"
+    score: 50
+
+  - id: suspicious-file-write
+    name: Write Outside Allowed Tree
+    description: Attempt to write outside the build workdir
+    category: filesystem
+    severity: medium
+    pattern: "Read-only file system|Permission denied"
+    score: 15
