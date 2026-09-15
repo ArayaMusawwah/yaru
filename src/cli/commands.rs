@@ -37,7 +37,7 @@ async fn build(dir: &str, dry_run: bool) -> Result<()> {
         anyhow::bail!("directory not found: {dir}");
     }
 
-    let cfg = config::load();
+    let cfg = config::load()?;
     let policy = crate::core::policy::PolicyEngine::with_whitelist(cfg.whitelisted_rules.clone());
     let name = path
         .file_name()
@@ -141,7 +141,7 @@ async fn gateway(dry_run: bool, args: &[String]) -> Result<()> {
             std::process::exit(status.code().unwrap_or(1));
         }
         GatewayAction::EvaluateInstall { packages, .. } => {
-            let cfg = config::load();
+            let cfg = config::load()?;
             let policy =
                 crate::core::policy::PolicyEngine::with_whitelist(cfg.whitelisted_rules.clone());
             let aur = AurClient::new();
@@ -272,7 +272,7 @@ async fn sandbox_run(dir: &str, command: &[String]) -> Result<()> {
         anyhow::bail!("bubblewrap (bwrap) not found on this system");
     }
 
-    let cfg = config::load();
+    let cfg = config::load()?;
     let sb = Sandbox::new(cfg.sandbox.network_mode, dir);
     let argv: Vec<&str> = command.iter().map(|s| s.as_str()).collect();
 
@@ -364,7 +364,7 @@ fn open_db() -> Result<Database> {
 
 fn status() -> Result<()> {
     output::print_banner();
-    let cfg = config::load();
+    let cfg = config::load()?;
 
     let db_state = match open_db() {
         Ok(db) => {
@@ -412,7 +412,7 @@ fn status() -> Result<()> {
 }
 
 async fn inspect(package: &str, deep: bool) -> Result<()> {
-    let cfg = config::load();
+    let cfg = config::load()?;
     let aur = AurClient::new();
     let classification = crate::core::classifier::classify(package, &aur)
         .await
@@ -460,7 +460,7 @@ async fn inspect(package: &str, deep: bool) -> Result<()> {
 }
 
 async fn inspect_local(dir: &Path, deep: bool) -> Result<()> {
-    let cfg = config::load();
+    let cfg = config::load()?;
     let policy = crate::core::policy::PolicyEngine::with_whitelist(cfg.whitelisted_rules.clone());
     let name = dir
         .file_name()
@@ -663,7 +663,7 @@ fn allow_rule(rule: &str) -> Result<()> {
     };
     std::fs::create_dir_all(&dir)?;
     let path = dir.join("config.toml");
-    let mut cfg = config::load();
+    let mut cfg = config::load()?;
     if !cfg.whitelisted_rules.iter().any(|r| r == rule) {
         cfg.whitelisted_rules.push(rule.to_string());
     }

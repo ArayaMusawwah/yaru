@@ -49,6 +49,10 @@ impl Sandbox {
             "--ro-bind".into(),
             "/etc".into(),
             "/etc".into(),
+            // makepkg invokes pacman -T; expose package metadata read-only.
+            "--ro-bind".into(),
+            "/var/lib/pacman".into(),
+            "/var/lib/pacman".into(),
             // Arch symlinks: /bin /lib /lib64 -> usr/*
             "--symlink".into(),
             "usr/bin".into(),
