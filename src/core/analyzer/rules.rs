@@ -97,6 +97,7 @@ fn rule_matches(rule: &Rule, text: &str, line: &str, line_idx: usize) -> bool {
     match rule.id.as_str() {
         "remote-shell-download" => remote_shell_download(line),
         "network-fetch-in-build" => network_fetch_in_build(text, line, line_idx),
+        "exec-invocation" => exec_invocation(line),
         "obfuscated-payload" => false,
         _ => {
             let pattern_matches = !rule.pattern.is_empty() && line.contains(&rule.pattern);
@@ -142,6 +143,36 @@ fn remote_shell_download(line: &str) -> bool {
         && (lower.contains("+x") || lower.contains("755") || lower.contains("700"))
         && (lower.contains("./") || lower.contains(" /tmp/") || lower.contains(" /var/tmp/"));
     piped_interpreter || chmod_then_execute
+}
+
+/// Matches the shell builtin `exec <cmd>`, while strictly ignoring option flags
+/// like `-exec` in `find` commands.
+fn exec_invocation(line: &str) -> bool {
+    let trimmed = line.trim();
+    if trimmed.starts_with('#') {
+        return false;
+    }
+    if trimmed.starts_with("exec ") || trimmed == "exec" {
+        return true;
+    }
+    let separators = ["; exec ", "&& exec ", "|| exec ", "| exec ", "(exec "];
+    if separators.iter().any(|sep| trimmed.contains(sep)) {
+        return true;
+    }
+    let words: Vec<&str> = trimmed.split_whitespace().collect();
+    for (i, &word) in words.iter().enumerate() {
+        if word == "exec" && i > 0 {
+            let prev = words[i - 1];
+            if prev.ends_with(';')
+                || prev.ends_with('&')
+                || prev.ends_with('|')
+                || prev.ends_with('(')
+            {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 #[cfg(test)]
@@ -241,5 +272,27 @@ mod tests {
         assert_eq!(parse_severity("CRITICAL"), Severity::Critical);
         assert_eq!(parse_severity("High"), Severity::High);
         assert_eq!(parse_severity("nonsense"), Severity::Medium);
+    }
+
+    #[test]
+    fn find_exec_is_not_flagged_as_exec_invocation() {
+        let rules = RuleSet::builtin();
+        let text = "find data -type f -exec install -Dm644 {} \"${pkgdir}/opt/namida/{}\" \\\n";
+        let findings = rules.evaluate("PKGBUILD", text);
+        assert!(
+            !findings.iter().any(|f| f.rule_id == "exec-invocation"),
+            "find -exec should not trigger exec-invocation"
+        );
+    }
+
+    #[test]
+    fn real_exec_invocation_is_flagged() {
+        let rules = RuleSet::builtin();
+        let text = "exec \"$binary_path\" \"$@\"\n";
+        let findings = rules.evaluate("PKGBUILD", text);
+        assert!(
+            findings.iter().any(|f| f.rule_id == "exec-invocation"),
+            "bare exec command must trigger exec-invocation"
+        );
     }
 }
