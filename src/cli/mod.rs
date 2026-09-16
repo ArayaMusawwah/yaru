@@ -53,6 +53,7 @@ pub enum Command {
         command: IocCommand,
     },
     /// Evaluate `paru -S` targets, then forward to the real paru binary
+    #[command(disable_help_flag = true)]
     Gateway {
         /// Evaluate and report only; never execute paru
         #[arg(long)]
