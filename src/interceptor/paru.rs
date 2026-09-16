@@ -12,17 +12,26 @@ pub enum GatewayAction {
     EvaluateInstall {
         packages: Vec<String>,
         passthrough_flags: Vec<String>,
+        allowed_packages: Vec<String>,
+        cleaned_args: Vec<String>,
     },
     /// System upgrade operation (-Syu, -Syyu, -u, or bare `paru`): requires querying
     /// out-of-date AUR packages and evaluating them before proceeding.
-    EvaluateUpgrade { passthrough_flags: Vec<String> },
+    EvaluateUpgrade {
+        passthrough_flags: Vec<String>,
+        allowed_packages: Vec<String>,
+        cleaned_args: Vec<String>,
+    },
 }
 
-/// Parses command line arguments to separate action, flags, and package targets.
+/// Parses command line arguments to separate action, flags, package targets,
+/// and single-run allow overrides (`--allow <pkg>` / `--allow-pkg <pkg>`).
 pub fn parse_gateway_args(args: &[String]) -> GatewayAction {
     if args.is_empty() {
         return GatewayAction::EvaluateUpgrade {
             passthrough_flags: Vec::new(),
+            allowed_packages: Vec::new(),
+            cleaned_args: Vec::new(),
         };
     }
 
@@ -30,10 +39,31 @@ pub fn parse_gateway_args(args: &[String]) -> GatewayAction {
     let mut is_upgrade = false;
     let mut packages = Vec::new();
     let mut passthrough_flags = Vec::new();
+    let mut allowed_packages = Vec::new();
+    let mut cleaned_args = Vec::new();
 
     let mut i = 0;
     while i < args.len() {
         let arg = &args[i];
+
+        if arg == "--allow" || arg == "--allow-pkg" {
+            if i + 1 < args.len() {
+                allowed_packages.push(args[i + 1].clone());
+                i += 2;
+                continue;
+            }
+        } else if let Some(pkg) = arg.strip_prefix("--allow=") {
+            allowed_packages.push(pkg.to_string());
+            i += 1;
+            continue;
+        } else if let Some(pkg) = arg.strip_prefix("--allow-pkg=") {
+            allowed_packages.push(pkg.to_string());
+            i += 1;
+            continue;
+        }
+
+        cleaned_args.push(arg.clone());
+
         if arg.starts_with('-') {
             passthrough_flags.push(arg.clone());
             if arg == "-S"
@@ -55,9 +85,15 @@ pub fn parse_gateway_args(args: &[String]) -> GatewayAction {
         GatewayAction::EvaluateInstall {
             packages,
             passthrough_flags,
+            allowed_packages,
+            cleaned_args,
         }
     } else if is_upgrade || (is_sync && packages.is_empty()) {
-        GatewayAction::EvaluateUpgrade { passthrough_flags }
+        GatewayAction::EvaluateUpgrade {
+            passthrough_flags,
+            allowed_packages,
+            cleaned_args,
+        }
     } else {
         GatewayAction::Forward
     }
@@ -163,6 +199,7 @@ mod tests {
             GatewayAction::EvaluateInstall {
                 packages,
                 passthrough_flags,
+                ..
             } => {
                 assert_eq!(packages, vec!["ripgrep", "google-chrome"]);
                 assert_eq!(passthrough_flags, vec!["-S", "--needed"]);
@@ -193,6 +230,27 @@ mod tests {
             parse_gateway_args(&empty),
             GatewayAction::EvaluateUpgrade { .. }
         ));
+    }
+
+    #[test]
+    fn parses_allow_package_flags() {
+        let args: Vec<String> = vec![
+            "-Syyu".into(),
+            "--allow".into(),
+            "winpodx".into(),
+            "--allow-pkg=another-pkg".into(),
+        ];
+        match parse_gateway_args(&args) {
+            GatewayAction::EvaluateUpgrade {
+                allowed_packages,
+                cleaned_args,
+                ..
+            } => {
+                assert_eq!(allowed_packages, vec!["winpodx", "another-pkg"]);
+                assert_eq!(cleaned_args, vec!["-Syyu"]);
+            }
+            _ => panic!("expected EvaluateUpgrade"),
+        }
     }
 
     #[test]

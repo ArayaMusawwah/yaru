@@ -161,10 +161,19 @@ async fn gateway(dry_run: bool, args: &[String]) -> Result<()> {
             let status = StdCommand::new(&real).args(args).status()?;
             std::process::exit(status.code().unwrap_or(1));
         }
-        GatewayAction::EvaluateInstall { packages, .. } => {
-            evaluate_and_forward(&real, &packages, dry_run, args).await
+        GatewayAction::EvaluateInstall {
+            packages,
+            allowed_packages,
+            cleaned_args,
+            ..
+        } => {
+            evaluate_and_forward(&real, &packages, &allowed_packages, dry_run, &cleaned_args).await
         }
-        GatewayAction::EvaluateUpgrade { .. } => {
+        GatewayAction::EvaluateUpgrade {
+            allowed_packages,
+            cleaned_args,
+            ..
+        } => {
             println!("  Checking for outdated AUR packages before upgrade…");
             let aur_upgrades = match query_aur_upgrades(&real) {
                 Ok(pkgs) => pkgs,
@@ -183,11 +192,11 @@ async fn gateway(dry_run: bool, args: &[String]) -> Result<()> {
                     println!(
                         "\n  [dry-run] would forward to {}: {}",
                         real.display(),
-                        args.join(" ")
+                        cleaned_args.join(" ")
                     );
                     return Ok(());
                 }
-                let status = StdCommand::new(&real).args(args).status()?;
+                let status = StdCommand::new(&real).args(&cleaned_args).status()?;
                 std::process::exit(status.code().unwrap_or(1));
             } else {
                 println!(
@@ -195,7 +204,14 @@ async fn gateway(dry_run: bool, args: &[String]) -> Result<()> {
                     aur_upgrades.len(),
                     aur_upgrades.join(", ")
                 );
-                evaluate_and_forward(&real, &aur_upgrades, dry_run, args).await
+                evaluate_and_forward(
+                    &real,
+                    &aur_upgrades,
+                    &allowed_packages,
+                    dry_run,
+                    &cleaned_args,
+                )
+                .await
             }
         }
     }
@@ -204,9 +220,11 @@ async fn gateway(dry_run: bool, args: &[String]) -> Result<()> {
 async fn evaluate_and_forward(
     real: &Path,
     packages: &[String],
+    allowed_packages: &[String],
     dry_run: bool,
-    args: &[String],
+    forward_args: &[String],
 ) -> Result<()> {
+    use crate::core::types::Verdict;
     use crate::interceptor::GatewayDecision;
     use std::process::Command as StdCommand;
 
@@ -216,6 +234,20 @@ async fn evaluate_and_forward(
     let mut decision = GatewayDecision::new();
 
     for pkg in packages {
+        if allowed_packages.contains(pkg) {
+            println!(
+                "\n  {} {pkg}: single-run override explicitly allowed via CLI (--allow)",
+                "[OK]".green().bold()
+            );
+            decision.record(
+                pkg,
+                TrustZone::Aur,
+                Verdict::Allow,
+                "single-run override via CLI".into(),
+            );
+            continue;
+        }
+
         let classification = crate::core::classifier::classify(pkg, &aur)
             .await
             .map_err(|e| anyhow!("classification failed for {pkg}: {e}"))?;
@@ -311,12 +343,12 @@ async fn evaluate_and_forward(
         println!(
             "\n  [dry-run] would forward to {}: {}",
             real.display(),
-            args.join(" ")
+            forward_args.join(" ")
         );
         return Ok(());
     }
 
-    let status = StdCommand::new(real).args(args).status()?;
+    let status = StdCommand::new(real).args(forward_args).status()?;
     std::process::exit(status.code().unwrap_or(1));
 }
 

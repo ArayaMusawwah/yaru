@@ -261,3 +261,22 @@ fn test_cli_gateway_dry_run_upgrade_flags() {
         "Checking for outdated AUR packages before upgrade",
     ));
 }
+
+#[test]
+fn test_cli_gateway_dry_run_allow_package_override() {
+    let mut cmd = Command::cargo_bin("yaru").unwrap();
+    cmd.arg("gateway")
+        .arg("--dry-run")
+        .arg("--allow")
+        .arg("totally-not-real-ghost-pkg-xyz-987")
+        .arg("-S")
+        .arg("totally-not-real-ghost-pkg-xyz-987");
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "single-run override explicitly allowed",
+        ))
+        .stdout(predicate::str::contains(
+            "would forward to /usr/bin/paru: -S totally-not-real-ghost-pkg-xyz-987",
+        ));
+}
