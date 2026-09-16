@@ -245,3 +245,19 @@ fn test_cli_ioc_import_json() {
         .success()
         .stdout(predicate::str::contains("imported 1 threat indicators"));
 }
+
+#[test]
+fn test_cli_gateway_dry_run_upgrade_flags() {
+    let tmp = tempdir().unwrap();
+    let cfg = "whitelisted_rules = []\n\n[policy]\non_warn = \"Continue\"\n";
+    fs::write(tmp.path().join("config.toml"), cfg).unwrap();
+
+    let mut cmd = Command::cargo_bin("yaru").unwrap();
+    cmd.env("YARU_CONFIG_DIR", tmp.path().to_str().unwrap())
+        .arg("gateway")
+        .arg("--dry-run")
+        .arg("-Syyu");
+    cmd.assert().stdout(predicate::str::contains(
+        "Checking for outdated AUR packages before upgrade",
+    ));
+}

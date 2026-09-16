@@ -1,6 +1,6 @@
 use crate::core::types::{TrustZone, Verdict};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
 
 /// Classified invocation of a paru/pacman command.
@@ -8,19 +8,26 @@ use std::process::{Command, ExitStatus};
 pub enum GatewayAction {
     /// Non-install operation (-Q, -R, -F, --help, etc.): forward directly to real paru.
     Forward,
-    /// Install operation (-S, -Sy, -Syu): requires package-by-package evaluation.
+    /// Install operation with explicit packages (-S pkg1 pkg2).
     EvaluateInstall {
         packages: Vec<String>,
         passthrough_flags: Vec<String>,
     },
+    /// System upgrade operation (-Syu, -Syyu, -u, or bare `paru`): requires querying
+    /// out-of-date AUR packages and evaluating them before proceeding.
+    EvaluateUpgrade { passthrough_flags: Vec<String> },
 }
 
 /// Parses command line arguments to separate action, flags, and package targets.
-///
-/// Targets are arguments that don't start with '-' and are not option arguments
-/// for known pacman flags.
 pub fn parse_gateway_args(args: &[String]) -> GatewayAction {
-    let mut is_install = false;
+    if args.is_empty() {
+        return GatewayAction::EvaluateUpgrade {
+            passthrough_flags: Vec::new(),
+        };
+    }
+
+    let mut is_sync = false;
+    let mut is_upgrade = false;
     let mut packages = Vec::new();
     let mut passthrough_flags = Vec::new();
 
@@ -29,14 +36,14 @@ pub fn parse_gateway_args(args: &[String]) -> GatewayAction {
         let arg = &args[i];
         if arg.starts_with('-') {
             passthrough_flags.push(arg.clone());
-            // Check for -S, -Syu, -Sy, --sync
             if arg == "-S"
                 || arg == "--sync"
                 || (arg.starts_with("-S") && !arg.starts_with("-Ss") && !arg.starts_with("-Si"))
-                || arg.starts_with("-y")
-                || arg.starts_with("-u")
             {
-                is_install = true;
+                is_sync = true;
+            }
+            if arg.contains('u') || arg == "--sysupgrade" {
+                is_upgrade = true;
             }
         } else {
             packages.push(arg.clone());
@@ -44,14 +51,39 @@ pub fn parse_gateway_args(args: &[String]) -> GatewayAction {
         i += 1;
     }
 
-    if is_install && !packages.is_empty() {
+    if is_sync && !packages.is_empty() {
         GatewayAction::EvaluateInstall {
             packages,
             passthrough_flags,
         }
+    } else if is_upgrade || (is_sync && packages.is_empty()) {
+        GatewayAction::EvaluateUpgrade { passthrough_flags }
     } else {
         GatewayAction::Forward
     }
+}
+
+/// Parses the output of `paru -Qua` (or `paru -Qu --aur`) to extract package names.
+/// Expected line format: `<package_name> <old_ver> -> <new_ver>`
+pub fn parse_aur_upgrades(output: &str) -> Vec<String> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with("::") || line.starts_with("error:") {
+                None
+            } else {
+                line.split_whitespace().next().map(String::from)
+            }
+        })
+        .collect()
+}
+
+/// Queries outdated AUR packages using `paru -Qua`.
+pub fn query_aur_upgrades(real_paru: &Path) -> std::io::Result<Vec<String>> {
+    let output = Command::new(real_paru).args(["-Qua"]).output()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(parse_aur_upgrades(&stdout))
 }
 
 /// Locates the real paru binary, avoiding loops if a wrapper is on PATH.
@@ -137,6 +169,41 @@ mod tests {
             }
             _ => panic!("expected EvaluateInstall"),
         }
+    }
+
+    #[test]
+    fn parses_upgrade_commands_as_evaluate_upgrade() {
+        // paru -Syu
+        let args: Vec<String> = vec!["-Syu".into()];
+        assert!(matches!(
+            parse_gateway_args(&args),
+            GatewayAction::EvaluateUpgrade { .. }
+        ));
+
+        // paru -Syyu
+        let args: Vec<String> = vec!["-Syyu".into()];
+        assert!(matches!(
+            parse_gateway_args(&args),
+            GatewayAction::EvaluateUpgrade { .. }
+        ));
+
+        // paru (empty args)
+        let empty: Vec<String> = vec![];
+        assert!(matches!(
+            parse_gateway_args(&empty),
+            GatewayAction::EvaluateUpgrade { .. }
+        ));
+    }
+
+    #[test]
+    fn parses_aur_upgrades_output() {
+        let sample = "\
+android-studio 2026.1.3.7-1 -> 2026.1.4.7-1
+ani-cli 4.15-1 -> 5.1-1
+google-chrome 153.0.8010.36-1 -> 153.0.8010.47-1
+";
+        let pkgs = parse_aur_upgrades(sample);
+        assert_eq!(pkgs, vec!["android-studio", "ani-cli", "google-chrome"]);
     }
 
     #[test]

@@ -141,8 +141,9 @@ async fn build(dir: &str, dry_run: bool) -> Result<()> {
 /// original arguments to the REAL paru binary. Opt-in and explicit — Yaru
 /// never wraps paru by itself.
 async fn gateway(dry_run: bool, args: &[String]) -> Result<()> {
-    use crate::core::types::Verdict;
-    use crate::interceptor::{GatewayAction, GatewayDecision, find_real_paru, parse_gateway_args};
+    use crate::interceptor::{
+        GatewayAction, find_real_paru, parse_gateway_args, query_aur_upgrades,
+    };
     use std::process::Command as StdCommand;
 
     let real =
@@ -161,123 +162,162 @@ async fn gateway(dry_run: bool, args: &[String]) -> Result<()> {
             std::process::exit(status.code().unwrap_or(1));
         }
         GatewayAction::EvaluateInstall { packages, .. } => {
-            let cfg = config::load()?;
-            let policy =
-                crate::core::policy::PolicyEngine::with_whitelist(cfg.whitelisted_rules.clone());
-            let aur = AurClient::new();
-            let mut decision = GatewayDecision::new();
-
-            for pkg in &packages {
-                let classification = crate::core::classifier::classify(pkg, &aur)
-                    .await
-                    .map_err(|e| anyhow!("classification failed for {pkg}: {e}"))?;
-
-                // Zone 0 fast path: no AUR pipeline, zero overhead. Every other
-                // zone is scored through the policy engine — never auto-allowed.
-                if classification.zone != TrustZone::Aur {
-                    let report = policy.evaluate(
-                        pkg,
-                        classification.zone,
-                        &ScoreBreakdown::default(),
-                        &[],
-                        &[],
-                    );
-                    output::print_report_card(&report);
-                    decision.record(
-                        pkg,
-                        classification.zone,
-                        report.verdict,
-                        report.reasons.join("; "),
-                    );
-                    continue;
+            evaluate_and_forward(&real, &packages, dry_run, args).await
+        }
+        GatewayAction::EvaluateUpgrade { .. } => {
+            println!("  Checking for outdated AUR packages before upgrade…");
+            let aur_upgrades = match query_aur_upgrades(&real) {
+                Ok(pkgs) => pkgs,
+                Err(e) => {
+                    tracing::warn!("failed to query AUR upgrades: {e}");
+                    Vec::new()
                 }
+            };
 
-                let dir = fetch_aur_snapshot(pkg, classification.url_path.as_deref()).await?;
-                let rules = crate::core::analyzer::RuleSet::builtin();
-                let analysis = crate::core::analyzer::analyze_pkgbuild_dir(&dir, &rules)
-                    .map_err(|e| anyhow!("analysis failed for {pkg}: {e}"))?;
-                let snapshot = crate::core::types::PackageSnapshot {
-                    package_name: analysis.package_name.clone().unwrap_or_else(|| pkg.clone()),
-                    version: analysis.version.clone(),
-                    maintainer: classification.maintainer.clone(),
-                    pkgbuild_hash: analysis.pkgbuild_hash.clone(),
-                    source_urls: analysis.source_urls.clone(),
-                    depends: analysis.depends.clone(),
-                    makedepends: analysis.makedepends.clone(),
-                    checkdepends: analysis.checkdepends.clone(),
-                    timestamp: chrono::Utc::now().timestamp(),
-                };
-
-                let mut maintainer_changes = Vec::new();
-                if let Ok(db) = open_db() {
-                    if let Ok(Some(prev)) = db.latest_snapshot(&snapshot.package_name) {
-                        if let Some(change) =
-                            crate::core::maintainer::detect_change(&prev, &snapshot)
-                        {
-                            maintainer_changes.push(change);
-                        }
-                    }
-                    let _ = db.save_snapshot(&snapshot);
-                }
-
-                let report = policy.evaluate(
-                    pkg,
-                    TrustZone::Aur,
-                    &ScoreBreakdown::default(),
-                    &analysis.findings,
-                    &maintainer_changes,
-                );
-                output::print_report_card(&report);
-                decision.record(
-                    pkg,
-                    TrustZone::Aur,
-                    report.verdict,
-                    report.reasons.join("; "),
-                );
-            }
-
-            println!();
-            if !decision.fast_path_packages.is_empty() {
+            if aur_upgrades.is_empty() {
                 println!(
-                    "  {} fast path (official zone): {}",
-                    "[OK]".green(),
-                    decision.fast_path_packages.join(", ")
+                    "  {} no AUR packages to upgrade (or query yielded none)",
+                    "[OK]".green()
                 );
-            }
-            for (pkg, reason) in &decision.warnings {
-                println!("  {} {pkg}: {reason}", "[!]".yellow());
-            }
-
-            // WARN honors policy: non-interactive gateway cannot ask, so
-            // on_warn = block refuses the whole batch.
-            if !decision.warnings.is_empty()
-                && cfg.policy.on_warn == crate::config::WarnAction::Block
-            {
-                anyhow::bail!(
-                    "yaru gateway refused: WARN verdict(s) present with policy on_warn = block"
-                );
-            }
-
-            if !decision.proceed {
-                for (pkg, reason) in &decision.blocked_packages {
-                    println!("  {} {pkg} BLOCKED: {reason}", "[X]".red());
+                if dry_run {
+                    println!(
+                        "\n  [dry-run] would forward to {}: {}",
+                        real.display(),
+                        args.join(" ")
+                    );
+                    return Ok(());
                 }
-                anyhow::bail!("yaru gateway refused to forward: blocked package(s) present");
-            }
-
-            if dry_run {
+                let status = StdCommand::new(&real).args(args).status()?;
+                std::process::exit(status.code().unwrap_or(1));
+            } else {
                 println!(
-                    "\n  [dry-run] would forward to {}: {}",
-                    real.display(),
-                    args.join(" ")
+                    "  Found {} AUR package upgrade(s): {}",
+                    aur_upgrades.len(),
+                    aur_upgrades.join(", ")
                 );
-                return Ok(());
+                evaluate_and_forward(&real, &aur_upgrades, dry_run, args).await
             }
-
-            let status = StdCommand::new(&real).args(args).status()?;
-            std::process::exit(status.code().unwrap_or(1));
         }
     }
+}
+
+async fn evaluate_and_forward(
+    real: &Path,
+    packages: &[String],
+    dry_run: bool,
+    args: &[String],
+) -> Result<()> {
+    use crate::interceptor::GatewayDecision;
+    use std::process::Command as StdCommand;
+
+    let cfg = config::load()?;
+    let policy = crate::core::policy::PolicyEngine::with_whitelist(cfg.whitelisted_rules.clone());
+    let aur = AurClient::new();
+    let mut decision = GatewayDecision::new();
+
+    for pkg in packages {
+        let classification = crate::core::classifier::classify(pkg, &aur)
+            .await
+            .map_err(|e| anyhow!("classification failed for {pkg}: {e}"))?;
+
+        // Zone 0 fast path: no AUR pipeline, zero overhead. Every other
+        // zone is scored through the policy engine — never auto-allowed.
+        if classification.zone != TrustZone::Aur {
+            let report = policy.evaluate(
+                pkg,
+                classification.zone,
+                &ScoreBreakdown::default(),
+                &[],
+                &[],
+            );
+            output::print_report_card(&report);
+            decision.record(
+                pkg,
+                classification.zone,
+                report.verdict,
+                report.reasons.join("; "),
+            );
+            continue;
+        }
+
+        let dir = fetch_aur_snapshot(pkg, classification.url_path.as_deref()).await?;
+        let rules = crate::core::analyzer::RuleSet::builtin();
+        let analysis = crate::core::analyzer::analyze_pkgbuild_dir(&dir, &rules)
+            .map_err(|e| anyhow!("analysis failed for {pkg}: {e}"))?;
+        let snapshot = crate::core::types::PackageSnapshot {
+            package_name: analysis.package_name.clone().unwrap_or_else(|| pkg.clone()),
+            version: analysis.version.clone(),
+            maintainer: classification.maintainer.clone(),
+            pkgbuild_hash: analysis.pkgbuild_hash.clone(),
+            source_urls: analysis.source_urls.clone(),
+            depends: analysis.depends.clone(),
+            makedepends: analysis.makedepends.clone(),
+            checkdepends: analysis.checkdepends.clone(),
+            timestamp: chrono::Utc::now().timestamp(),
+        };
+
+        let mut maintainer_changes = Vec::new();
+        if let Ok(db) = open_db() {
+            if let Ok(Some(prev)) = db.latest_snapshot(&snapshot.package_name) {
+                if let Some(change) = crate::core::maintainer::detect_change(&prev, &snapshot) {
+                    maintainer_changes.push(change);
+                }
+            }
+            let _ = db.save_snapshot(&snapshot);
+        }
+
+        let report = policy.evaluate(
+            pkg,
+            TrustZone::Aur,
+            &ScoreBreakdown::default(),
+            &analysis.findings,
+            &maintainer_changes,
+        );
+        output::print_report_card(&report);
+        decision.record(
+            pkg,
+            TrustZone::Aur,
+            report.verdict,
+            report.reasons.join("; "),
+        );
+    }
+
+    println!();
+    if !decision.fast_path_packages.is_empty() {
+        println!(
+            "  {} fast path (official zone): {}",
+            "[OK]".green(),
+            decision.fast_path_packages.join(", ")
+        );
+    }
+    for (pkg, reason) in &decision.warnings {
+        println!("  {} {pkg}: {reason}", "[!]".yellow());
+    }
+
+    // WARN honors policy: non-interactive gateway cannot ask, so
+    // on_warn = block refuses the whole batch.
+    if !decision.warnings.is_empty() && cfg.policy.on_warn == crate::config::WarnAction::Block {
+        anyhow::bail!("yaru gateway refused: WARN verdict(s) present with policy on_warn = block");
+    }
+
+    if !decision.proceed {
+        for (pkg, reason) in &decision.blocked_packages {
+            println!("  {} {pkg} BLOCKED: {reason}", "[X]".red());
+        }
+        anyhow::bail!("yaru gateway refused to forward: blocked package(s) present");
+    }
+
+    if dry_run {
+        println!(
+            "\n  [dry-run] would forward to {}: {}",
+            real.display(),
+            args.join(" ")
+        );
+        return Ok(());
+    }
+
+    let status = StdCommand::new(real).args(args).status()?;
+    std::process::exit(status.code().unwrap_or(1));
 }
 
 /// Executes a command inside the bubblewrap sandbox using the configured
