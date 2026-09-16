@@ -24,7 +24,27 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::Sandbox { dir, command } => sandbox_run(&dir, &command).await,
         Command::Build { dir, dry_run } => build(&dir, dry_run).await,
         Command::Gateway { dry_run, args } => gateway(dry_run, &args).await,
+        Command::Ioc { command } => match command {
+            crate::cli::IocCommand::Import { file } => ioc_import(&file),
+        },
     }
+}
+
+fn ioc_import(file: &str) -> Result<()> {
+    let path = Path::new(file);
+    if !path.is_file() {
+        anyhow::bail!("file not found: {file}");
+    }
+    let db = open_db()?;
+    let count = crate::core::threatintel::import_indicators(&db, path)
+        .map_err(|e| anyhow!("IOC import failed: {e}"))?;
+    println!(
+        "  {} imported {} threat indicators from {}",
+        "[OK]".green(),
+        count,
+        file
+    );
+    Ok(())
 }
 
 /// Evaluates a local PKGBUILD directory, and on a passing verdict runs

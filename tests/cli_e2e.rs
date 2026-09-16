@@ -225,3 +225,23 @@ fn test_cli_gateway_dry_run_unknown_package_refused() {
         .failure()
         .stdout(predicate::str::contains("BLOCKED: Source zone: UNKNOWN"));
 }
+
+#[test]
+fn test_cli_ioc_import_json() {
+    let tmp = tempdir().unwrap();
+    let ioc_file = tmp.path().join("indicators.json");
+    fs::write(
+        &ioc_file,
+        r#"[{"indicator":"malware.example","kind":"domain","severity":"Critical","confidence":0.99,"source":"test","first_seen":1,"last_seen":1,"status":"active"}]"#,
+    )
+    .unwrap();
+
+    let mut cmd = Command::cargo_bin("yaru").unwrap();
+    cmd.env("YARU_DB_PATH", tmp.path().join("yaru.db"))
+        .arg("ioc")
+        .arg("import")
+        .arg(ioc_file);
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("imported 1 threat indicators"));
+}

@@ -47,6 +47,11 @@ pub enum Command {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Manage local threat intelligence indicators
+    Ioc {
+        #[command(subcommand)]
+        command: IocCommand,
+    },
     /// Evaluate `paru -S` targets, then forward to the real paru binary
     Gateway {
         /// Evaluate and report only; never execute paru
@@ -56,4 +61,10 @@ pub enum Command {
         #[arg(num_args = 1.., trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum IocCommand {
+    /// Import IOC indicators from a JSON or YAML file into the local SQLite database
+    Import { file: String },
 }

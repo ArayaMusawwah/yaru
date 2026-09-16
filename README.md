@@ -150,6 +150,18 @@ yaru trust <package-name>
 
 # Whitelist a specific rule ID on this machine
 yaru allow-rule <rule-id>
+
+# Run a command in an isolated bubblewrap sandbox
+yaru sandbox /path/to/dir [command...]
+
+# Evaluate a PKGBUILD directory and build inside sandbox on passing verdict
+yaru build /path/to/dir [--dry-run]
+
+# Evaluate paru -S package targets through Yaru then forward to real paru
+yaru gateway [--dry-run] -S <package-name...>
+
+# Import IOC indicators from a JSON or YAML file into local SQLite
+yaru ioc import /path/to/indicators.json
 ```
 
 ---

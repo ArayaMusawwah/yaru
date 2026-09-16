@@ -25,6 +25,51 @@ pub struct ThreatIntelEngine<'a> {
     db: &'a Database,
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum ImportError {
+    #[error("cannot read IOC file {path}: {source}")]
+    Io {
+        path: String,
+        source: std::io::Error,
+    },
+    #[error("invalid IOC file {path}: {message}")]
+    Parse { path: String, message: String },
+    #[error("failed to store IOC: {0}")]
+    Storage(#[from] crate::storage::StorageError),
+}
+
+/// Imports a JSON or YAML array of threat indicators into SQLite.
+pub fn import_indicators(db: &Database, path: &std::path::Path) -> Result<usize, ImportError> {
+    let path_display = path.display().to_string();
+    let text = std::fs::read_to_string(path).map_err(|source| ImportError::Io {
+        path: path_display.clone(),
+        source,
+    })?;
+    let indicators: Vec<crate::storage::ThreatIndicator> =
+        match path.extension().and_then(|e| e.to_str()) {
+            Some("yaml") | Some("yml") => serde_yaml::from_str(&text).map_err(|e| e.to_string()),
+            _ => serde_json::from_str(&text).map_err(|e| e.to_string()),
+        }
+        .map_err(|message| ImportError::Parse {
+            path: path_display,
+            message,
+        })?;
+
+    for indicator in &indicators {
+        if indicator.indicator.trim().is_empty()
+            || !(0.0..=1.0).contains(&indicator.confidence)
+            || indicator.kind.trim().is_empty()
+        {
+            return Err(ImportError::Parse {
+                path: path.display().to_string(),
+                message: "indicator, kind, and confidence 0.0..=1.0 are required".into(),
+            });
+        }
+        db.store_indicator(indicator)?;
+    }
+    Ok(indicators.len())
+}
+
 impl<'a> ThreatIntelEngine<'a> {
     pub fn new(db: &'a Database) -> Self {
         Self { db }
@@ -140,5 +185,31 @@ mod tests {
         let matches = engine.match_candidates(&["safe-host.com".into()]);
         assert!(matches.is_empty());
         assert_eq!(engine.calculate_score(&matches), 0);
+    }
+
+    #[test]
+    fn imports_indicators_from_json_and_yaml() {
+        let db = Database::open_in_memory().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+
+        let json_path = tmp.path().join("i.json");
+        std::fs::write(
+            &json_path,
+            r#"[{"indicator":"bad.com","kind":"domain","severity":"High","confidence":0.9,"source":"t","first_seen":1,"last_seen":1,"status":"a"}]"#,
+        )
+        .unwrap();
+        let count = import_indicators(&db, &json_path).unwrap();
+        assert_eq!(count, 1);
+        assert!(db.lookup_indicator("bad.com").unwrap().is_some());
+
+        let yaml_path = tmp.path().join("i.yaml");
+        std::fs::write(
+            &yaml_path,
+            "- indicator: malicious.org\n  kind: domain\n  severity: Critical\n  confidence: 0.95\n  source: t\n  first_seen: 1\n  last_seen: 1\n  status: a\n",
+        )
+        .unwrap();
+        let count_yaml = import_indicators(&db, &yaml_path).unwrap();
+        assert_eq!(count_yaml, 1);
+        assert!(db.lookup_indicator("malicious.org").unwrap().is_some());
     }
 }
