@@ -10,6 +10,8 @@ pub struct YaruConfig {
     pub policy: PolicyConfig,
     #[serde(default)]
     pub sandbox: SandboxConfig,
+    #[serde(default)]
+    pub ioc_feed: IocFeedConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -76,8 +78,35 @@ impl Default for YaruConfig {
             whitelisted_rules: Vec::new(),
             policy: PolicyConfig::default(),
             sandbox: SandboxConfig::default(),
+            ioc_feed: IocFeedConfig::default(),
         }
     }
+}
+
+/// Community IOC feed configuration. Disabled by default; the URL is
+/// user-configured only — no hardcoded third-party endpoint.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IocFeedConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub url: String,
+    #[serde(default = "default_refresh_hours")]
+    pub refresh_hours: u64,
+}
+
+impl Default for IocFeedConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            url: String::new(),
+            refresh_hours: default_refresh_hours(),
+        }
+    }
+}
+
+fn default_refresh_hours() -> u64 {
+    24
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -149,5 +178,33 @@ mod tests {
         assert!(res.is_err(), "malformed config must return Err");
         let msg = res.unwrap_err().to_string();
         assert!(msg.contains("invalid config file"));
+    }
+
+    #[test]
+    fn feed_config_is_disabled_by_default() {
+        let cfg = YaruConfig::default();
+        assert!(!cfg.ioc_feed.enabled);
+        assert!(cfg.ioc_feed.url.is_empty());
+        assert_eq!(cfg.ioc_feed.refresh_hours, 24);
+    }
+
+    #[test]
+    fn feed_config_parses_toml() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("config.toml"),
+            br#"[ioc_feed]
+enabled = true
+url = "https://example.com/iocs.json"
+refresh_hours = 12
+"#,
+        )
+        .unwrap();
+        unsafe { std::env::set_var("YARU_CONFIG_DIR", tmp.path()) };
+        let cfg = load().unwrap();
+        unsafe { std::env::remove_var("YARU_CONFIG_DIR") };
+        assert!(cfg.ioc_feed.enabled);
+        assert_eq!(cfg.ioc_feed.url, "https://example.com/iocs.json");
+        assert_eq!(cfg.ioc_feed.refresh_hours, 12);
     }
 }

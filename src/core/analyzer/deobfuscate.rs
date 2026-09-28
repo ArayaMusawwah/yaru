@@ -87,6 +87,11 @@ pub fn findings_from_encoded(file: &str, text: &str, rules: &RuleSet) -> Vec<Fin
                 file: file.to_string(),
                 line: payload.line,
                 excerpt: payload.decoded.trim().chars().take(160).collect(),
+                scope: if file.ends_with(".install") {
+                    crate::core::types::FindingScope::Install
+                } else {
+                    crate::core::types::FindingScope::Pkgbuild
+                },
             });
         }
         findings.extend(sub_findings.into_iter().map(|mut finding| {

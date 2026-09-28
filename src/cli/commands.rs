@@ -1,11 +1,12 @@
 use crate::cli::output;
 use crate::config;
 use crate::core::aur::AurClient;
+use crate::core::feed::{FeedConfig, sync_feed};
 use crate::core::types::{ScoreBreakdown, TrustZone};
 use crate::storage::{Database, DecisionRecord};
 use anyhow::{Context, Result, anyhow};
 use colored::Colorize;
-use std::io::Read;
+use std::io::{IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 
 use crate::cli::Cli;
@@ -24,8 +25,10 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::Sandbox { dir, command } => sandbox_run(&dir, &command).await,
         Command::Build { dir, dry_run } => build(&dir, dry_run).await,
         Command::Gateway { dry_run, args } => gateway(dry_run, &args).await,
+        Command::Report { today, days, json } => report(today, days, json),
         Command::Ioc { command } => match command {
             crate::cli::IocCommand::Import { file } => ioc_import(&file),
+            crate::cli::IocCommand::Sync { url } => ioc_sync(url.as_deref()).await,
         },
     }
 }
@@ -43,6 +46,27 @@ fn ioc_import(file: &str) -> Result<()> {
         "[OK]".green(),
         count,
         file
+    );
+    Ok(())
+}
+
+async fn ioc_sync(url_override: Option<&str>) -> Result<()> {
+    let config = config::load()?.ioc_feed;
+    let feed_config = FeedConfig {
+        enabled: url_override.is_some() || config.enabled,
+        url: url_override.unwrap_or(&config.url).to_string(),
+        refresh_hours: config.refresh_hours,
+    };
+    let db = open_db()?;
+    let client = reqwest::Client::new();
+    let result = sync_feed(&client, &db, &feed_config)
+        .await
+        .map_err(|e| anyhow!("IOC sync failed: {e}"))?;
+    println!(
+        "  {} synced {} IOC indicators from {}",
+        "[OK]".green(),
+        result.added,
+        feed_config.url
     );
     Ok(())
 }
@@ -165,13 +189,23 @@ async fn gateway(dry_run: bool, args: &[String]) -> Result<()> {
             packages,
             allowed_packages,
             cleaned_args,
+            mode,
             ..
         } => {
-            evaluate_and_forward(&real, &packages, &allowed_packages, dry_run, &cleaned_args).await
+            evaluate_and_forward(
+                &real,
+                &packages,
+                &allowed_packages,
+                dry_run,
+                &cleaned_args,
+                mode,
+            )
+            .await
         }
         GatewayAction::EvaluateUpgrade {
             allowed_packages,
             cleaned_args,
+            mode,
             ..
         } => {
             println!("  Checking for outdated AUR packages before upgrade…");
@@ -210,6 +244,7 @@ async fn gateway(dry_run: bool, args: &[String]) -> Result<()> {
                     &allowed_packages,
                     dry_run,
                     &cleaned_args,
+                    mode,
                 )
                 .await
             }
@@ -223,6 +258,7 @@ async fn evaluate_and_forward(
     allowed_packages: &[String],
     dry_run: bool,
     forward_args: &[String],
+    mode: crate::interceptor::GatewayMode,
 ) -> Result<()> {
     use crate::core::types::Verdict;
     use crate::interceptor::GatewayDecision;
@@ -272,7 +308,53 @@ async fn evaluate_and_forward(
             continue;
         }
 
+        // 15-minute scan cache check: avoids re-downloading and re-analyzing
+        // if package version and maintainer have not changed in AUR.
+        let policy_fp = format!("{:?}", cfg.whitelisted_rules);
+        let fingerprint = format!(
+            "{}:{}:{}",
+            classification.version.as_deref().unwrap_or(""),
+            classification.maintainer.as_deref().unwrap_or(""),
+            policy_fp
+        );
+
+        let mut cached_report: Option<crate::core::types::RiskReport> = None;
+        if let Ok(db) = open_db() {
+            if let Ok(Some(cached)) = db.get_valid_scan_cache(pkg, &fingerprint, 900) {
+                println!(
+                    "  {} {pkg}: using cached verification result (fresh within 15m)",
+                    "[CACHE]".cyan().bold()
+                );
+                let report = crate::core::types::RiskReport {
+                    package: cached.package,
+                    zone: TrustZone::Aur,
+                    breakdown: cached.breakdown,
+                    findings: cached.findings,
+                    maintainer_changes: Vec::new(),
+                    verdict: cached.verdict,
+                    reasons: cached.reasons,
+                };
+                cached_report = Some(report);
+            }
+        }
+
+        if let Some(report) = cached_report {
+            output::print_report_card(&report);
+            decision.record(
+                pkg,
+                TrustZone::Aur,
+                report.verdict,
+                report.reasons.join("; "),
+            );
+            continue;
+        }
+
         let dir = fetch_aur_snapshot(pkg, classification.url_path.as_deref()).await?;
+        let rules = crate::core::analyzer::RuleSet::builtin();
+        let analysis = crate::core::analyzer::analyze_pkgbuild_dir(&dir, &rules)
+            .map_err(|e| anyhow!("analysis failed for {pkg}: {e}"))?;
+        // Include install_hash: .install changes invalidate cache even when version is same
+        let fingerprint = format!("{fingerprint}:{}", analysis.install_hash);
         let rules = crate::core::analyzer::RuleSet::builtin();
         let analysis = crate::core::analyzer::analyze_pkgbuild_dir(&dir, &rules)
             .map_err(|e| anyhow!("analysis failed for {pkg}: {e}"))?;
@@ -305,6 +387,22 @@ async fn evaluate_and_forward(
             &analysis.findings,
             &maintainer_changes,
         );
+
+        // Save successful evaluation to scan_cache for fast 15-minute reuse
+        if let Ok(db) = open_db() {
+            let cache_entry = crate::storage::models::CachedScan {
+                package: pkg.clone(),
+                fingerprint,
+                breakdown: report.breakdown.clone(),
+                findings: report.findings.clone(),
+                verdict: report.verdict,
+                reasons: report.reasons.clone(),
+                snapshot: snapshot.clone(),
+                timestamp: chrono::Utc::now().timestamp(),
+            };
+            let _ = db.save_scan_cache(&cache_entry);
+        }
+
         output::print_report_card(&report);
         decision.record(
             pkg,
@@ -332,23 +430,97 @@ async fn evaluate_and_forward(
         anyhow::bail!("yaru gateway refused: WARN verdict(s) present with policy on_warn = block");
     }
 
+    let mut final_args = forward_args.to_vec();
     if !decision.proceed {
         for (pkg, reason) in &decision.blocked_packages {
             println!("  {} {pkg} BLOCKED: {reason}", "[X]".red());
         }
-        anyhow::bail!("yaru gateway refused to forward: blocked package(s) present");
+
+        let mut blocked: Vec<String> = decision
+            .blocked_packages
+            .iter()
+            .map(|(pkg, _)| pkg.clone())
+            .collect();
+        let should_skip = match mode {
+            crate::interceptor::GatewayMode::AutoSkip => true,
+            crate::interceptor::GatewayMode::Interactive
+                if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() =>
+            {
+                let mut out = std::io::stdout().lock();
+                let mut input = std::io::stdin().lock();
+                loop {
+                    if blocked.is_empty() {
+                        break true;
+                    }
+                    match crate::cli::prompt::ask(&mut out, &mut input)? {
+                        Some(crate::cli::prompt::GatewayChoice::Skip) => break true,
+                        Some(crate::cli::prompt::GatewayChoice::Details) => {
+                            for (pkg, reason) in &decision.blocked_packages {
+                                if blocked.contains(pkg) {
+                                    println!("  [X] {pkg}: {reason}");
+                                }
+                            }
+                        }
+                        Some(crate::cli::prompt::GatewayChoice::Allow) => {
+                            match crate::cli::prompt::select_package(
+                                &mut out, &mut input, &blocked,
+                            )? {
+                                Some(idx) => {
+                                    let pkg = blocked[idx].clone();
+                                    writeln!(
+                                        out,
+                                        "  [!] {pkg} has CRITICAL findings. Allowing bypasses security checks for this run."
+                                    )?;
+                                    if crate::cli::prompt::confirm(&mut out, &mut input)? {
+                                        writeln!(out, "  {} {pkg}: allowed once", "[OK]".green())?;
+                                        blocked.retain(|p| p != &pkg);
+                                    } else {
+                                        writeln!(out, "  Cancelled.")?;
+                                    }
+                                }
+                                None => writeln!(out, "  Invalid selection.")?,
+                            }
+                        }
+                        Some(crate::cli::prompt::GatewayChoice::Abort) | None => break false,
+                    }
+                }
+            }
+            _ => false,
+        };
+
+        if !should_skip {
+            anyhow::bail!("yaru gateway refused to forward: blocked package(s) present");
+        }
+        final_args = crate::interceptor::append_ignored_packages(&final_args, &blocked);
+        println!("  [!] Skipping blocked package(s): {}", blocked.join(", "));
+    }
+
+    // Phase 3 Sandbox Wrapper: Delegate makepkg execution through yaru sandbox
+    // via paru's built-in --makepkg flag if backend is available and not already set.
+    let wrapper_path = dirs::home_dir()
+        .map(|h| h.join(".local/bin/yaru-makepkg"))
+        .unwrap_or_else(|| PathBuf::from("/usr/local/bin/yaru-makepkg"));
+
+    if wrapper_path.is_file()
+        && crate::sandbox::Sandbox::backend_available()
+        && !final_args
+            .iter()
+            .any(|arg| arg == "--makepkg" || arg.starts_with("--makepkg="))
+    {
+        final_args.push("--makepkg".into());
+        final_args.push(wrapper_path.to_string_lossy().to_string());
     }
 
     if dry_run {
         println!(
             "\n  [dry-run] would forward to {}: {}",
             real.display(),
-            forward_args.join(" ")
+            final_args.join(" ")
         );
         return Ok(());
     }
 
-    let status = StdCommand::new(real).args(forward_args).status()?;
+    let status = StdCommand::new(real).args(&final_args).status()?;
     std::process::exit(status.code().unwrap_or(1));
 }
 
@@ -537,6 +709,7 @@ async fn inspect(package: &str, deep: bool) -> Result<()> {
     if deep {
         output::print_findings(&report.findings);
     }
+    output::print_source_integrity(&report.findings);
     output::print_reasons(&report.reasons);
 
     if let Ok(db) = open_db() {
@@ -563,6 +736,7 @@ async fn inspect_local(dir: &Path, deep: bool) -> Result<()> {
     if deep {
         output::print_findings(&report.findings);
     }
+    output::print_source_integrity(&report.findings);
     output::print_reasons(&report.reasons);
     Ok(())
 }
@@ -714,6 +888,34 @@ fn history(package: &str) -> Result<()> {
             );
         }
     }
+    Ok(())
+}
+
+fn report(today: bool, days: Option<u64>, json: bool) -> Result<()> {
+    let db = open_db()?;
+    let now = chrono::Utc::now();
+    let (from, label) = if today {
+        let start = now.date_naive().and_hms_opt(0, 0, 0).unwrap().and_utc();
+        (start.timestamp(), "today".to_string())
+    } else {
+        let window_days = days.unwrap_or(1);
+        let start = now - chrono::Duration::days(window_days as i64);
+        (start.timestamp(), format!("last {window_days}d"))
+    };
+    let rep = crate::core::report::SecurityReport::build(&db, from, now.timestamp())
+        .map_err(|e| anyhow!("report failed: {e}"))?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&rep)?);
+        return Ok(());
+    }
+    println!();
+    println!("  Security report ({label})");
+    println!("  {}", "─".repeat(60));
+    println!("  Scanned      : {}", rep.scanned);
+    println!("  Allowed      : {}", rep.allowed);
+    println!("  Warned       : {}", rep.warned);
+    println!("  Quarantined  : {}", rep.quarantined);
+    println!("  Blocked      : {}", rep.blocked);
     Ok(())
 }
 

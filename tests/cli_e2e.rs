@@ -28,8 +28,8 @@ pkgname=clean-test
 pkgver=1.0.0
 pkgrel=1
 arch=('x86_64')
-source=("https://example.com/source.tar.gz")
-sha256sums=('SKIP')
+source=("https://example.com/source-1.0.0.tar.gz")
+sha256sums=('b2sum1234567890abcdef')
 
 build() {
     echo "compiling cleanly"
@@ -174,8 +174,8 @@ fn test_cli_build_dry_run_clean_pkgbuild() {
 pkgname=build-clean-test
 pkgver=1
 pkgrel=1
-source=("https://example.com/x.tar.gz")
-sha256sums=('SKIP')
+source=("https://example.com/x-1.0.0.tar.gz")
+sha256sums=('b2sum1234567890abcdef')
 build() { true; }
 "#,
     )
@@ -205,12 +205,10 @@ fn test_cli_gateway_dry_run_non_install_forwards() {
 #[test]
 fn test_cli_gateway_dry_run_official_fast_path() {
     let mut cmd = Command::cargo_bin("yaru").unwrap();
-    cmd.arg("gateway").arg("--dry-run").arg("-S").arg("firefox");
+    cmd.arg("gateway").arg("--dry-run").arg("-S").arg("linux");
     cmd.assert()
         .success()
-        .stdout(predicate::str::contains(
-            "fast path (official zone): firefox",
-        ))
+        .stdout(predicate::str::contains("fast path (official zone): linux"))
         .stdout(predicate::str::contains("would forward"));
 }
 
@@ -279,4 +277,62 @@ fn test_cli_gateway_dry_run_allow_package_override() {
         .stdout(predicate::str::contains(
             "would forward to /usr/bin/paru: -S totally-not-real-ghost-pkg-xyz-987",
         ));
+}
+
+#[test]
+fn test_cli_gateway_dry_run_auto_skip_blocked_package() {
+    let mut cmd = Command::cargo_bin("yaru").unwrap();
+    cmd.arg("gateway")
+        .arg("--dry-run")
+        .arg("--auto-skip")
+        .arg("-S")
+        .arg("totally-not-real-ghost-pkg-xyz-987");
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Skipping blocked package(s): totally-not-real-ghost-pkg-xyz-987",
+        ))
+        .stdout(predicate::str::contains(
+            "--ignore totally-not-real-ghost-pkg-xyz-987",
+        ));
+}
+
+#[test]
+fn test_cli_gateway_uses_cache_on_second_run() {
+    let tmp = tempdir().unwrap();
+    let db_path = tmp.path().join("yaru.db");
+
+    // Non-AUR package (official zone) bypasses AUR pipeline entirely.
+    // Both runs must succeed without AUR network access.
+    let mut cmd1 = Command::cargo_bin("yaru").unwrap();
+    cmd1.env("YARU_DB_PATH", &db_path)
+        .arg("gateway")
+        .arg("--dry-run")
+        .arg("--auto-skip")
+        .arg("-S")
+        .arg("linux");
+    cmd1.assert().success();
+
+    let mut cmd2 = Command::cargo_bin("yaru").unwrap();
+    cmd2.env("YARU_DB_PATH", &db_path)
+        .arg("gateway")
+        .arg("--dry-run")
+        .arg("--auto-skip")
+        .arg("-S")
+        .arg("linux");
+    cmd2.assert().success();
+}
+
+#[test]
+fn test_cli_report_today_json() {
+    let tmp = tempdir().unwrap();
+    let mut cmd = Command::cargo_bin("yaru").unwrap();
+    cmd.env("YARU_DB_PATH", tmp.path().join("yaru.db"))
+        .arg("report")
+        .arg("--today")
+        .arg("--json");
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("scanned"))
+        .stdout(predicate::str::contains("blocked"));
 }

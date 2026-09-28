@@ -1,5 +1,6 @@
 pub mod commands;
 pub mod output;
+pub mod prompt;
 
 use clap::{Parser, Subcommand};
 
@@ -62,10 +63,27 @@ pub enum Command {
         #[arg(num_args = 1.., trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// Show aggregate security report for recent activity
+    Report {
+        /// Show only today's activity (default)
+        #[arg(long, conflicts_with = "days")]
+        today: bool,
+        /// Show activity for the last N days
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..=365))]
+        days: Option<u64>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
 pub enum IocCommand {
     /// Import IOC indicators from a JSON or YAML file into the local SQLite database
     Import { file: String },
+    /// Download and import IOC indicators from a remote URL (JSON or YAML)
+    Sync {
+        /// Feed URL; falls back to configured [ioc_feed] when omitted
+        url: Option<String>,
+    },
 }

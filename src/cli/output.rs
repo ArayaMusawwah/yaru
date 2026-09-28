@@ -113,3 +113,28 @@ pub fn print_reasons(reasons: &[String]) {
         println!("  {}. {}", i + 1, r);
     }
 }
+
+pub fn print_source_integrity(findings: &[Finding]) {
+    let src: Vec<_> = findings
+        .iter()
+        .filter(|f| f.category == "source-integrity")
+        .collect();
+    if src.is_empty() {
+        return;
+    }
+    println!(
+        "\n{}",
+        "── Source Integrity ───────────────────────────────────────────".yellow()
+    );
+    for f in src {
+        let tag = match f.severity {
+            Severity::Info => "[INFO]    ".dimmed(),
+            Severity::Low => "[LOW]     ".blue(),
+            Severity::Medium => "[MEDIUM]  ".yellow(),
+            Severity::High => "[HIGH]    ".bright_red(),
+            Severity::Critical => "[CRITICAL]".red().bold(),
+        };
+        println!("  {} {}:{} · {}", tag, f.file, f.line, f.title.bold());
+        println!("             {}", f.excerpt.trim().dimmed());
+    }
+}

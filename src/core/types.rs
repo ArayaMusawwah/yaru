@@ -88,6 +88,16 @@ pub struct Finding {
     pub file: String,
     pub line: usize,
     pub excerpt: String,
+    #[serde(default)]
+    pub scope: FindingScope,
+}
+
+/// Distinguishes findings originating from PKGBUILD vs install hooks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum FindingScope {
+    #[default]
+    Pkgbuild,
+    Install,
 }
 
 /// Verdict produced by the policy engine.

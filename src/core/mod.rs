@@ -3,9 +3,12 @@ pub mod aur;
 pub mod classifier;
 pub mod dependency;
 pub mod diff;
+pub mod feed;
 pub mod maintainer;
 pub mod policy;
+pub mod report;
 pub mod risk;
+pub mod source_integrity;
 pub mod threatintel;
 pub mod types;
 

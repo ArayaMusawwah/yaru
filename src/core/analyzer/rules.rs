@@ -1,5 +1,5 @@
 use super::pkgbuild::AnalyzerError;
-use crate::core::types::{Finding, Severity};
+use crate::core::types::{Finding, FindingScope, Severity};
 
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct Rule {
@@ -73,9 +73,13 @@ impl RuleSet {
     }
 
     pub fn evaluate(&self, file: &str, text: &str) -> Vec<Finding> {
+        let is_install = file.ends_with(".install");
         let mut findings = Vec::new();
         for (index, line) in text.lines().enumerate() {
             for rule in self.rules.iter().filter(|rule| rule.enabled) {
+                if rule.id.starts_with("install-") && !is_install {
+                    continue;
+                }
                 if rule_matches(rule, text, line, index) {
                     findings.push(Finding {
                         rule_id: rule.id.clone(),
@@ -85,6 +89,11 @@ impl RuleSet {
                         file: file.to_string(),
                         line: index + 1,
                         excerpt: line.trim().chars().take(160).collect(),
+                        scope: if is_install {
+                            FindingScope::Install
+                        } else {
+                            FindingScope::Pkgbuild
+                        },
                     });
                 }
             }
@@ -294,5 +303,65 @@ mod tests {
             findings.iter().any(|f| f.rule_id == "exec-invocation"),
             "bare exec command must trigger exec-invocation"
         );
+    }
+
+    #[test]
+    fn install_systemd_persistence_flagged_on_install_only() {
+        let rules = RuleSet::builtin();
+        let install_text = "post_install() {\n  systemctl enable myservice\n}";
+        let findings = rules.evaluate("hook.install", install_text);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.rule_id == "install-systemd-persistence")
+        );
+        let pkg_text = "build() {\n  systemctl enable myservice\n}";
+        let pkg_findings = rules.evaluate("PKGBUILD", pkg_text);
+        assert!(
+            !pkg_findings
+                .iter()
+                .any(|f| f.rule_id == "install-systemd-persistence")
+        );
+    }
+
+    #[test]
+    fn install_sudoers_modification_flagged() {
+        let rules = RuleSet::builtin();
+        let install_text =
+            "post_install() {\n  echo 'user ALL=(ALL) NOPASSWD: ALL' >> /etc/sudoers\n}";
+        let findings = rules.evaluate("hook.install", install_text);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.rule_id == "install-sudoers-modification")
+        );
+    }
+
+    #[test]
+    fn install_cron_persistence_flagged() {
+        let rules = RuleSet::builtin();
+        let install_text = "post_install() {\n  crontab -l\n}";
+        let findings = rules.evaluate("hook.install", install_text);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.rule_id == "install-cron-persistence")
+        );
+    }
+
+    #[test]
+    fn install_ld_preload_flagged() {
+        let rules = RuleSet::builtin();
+        let install_text = "post_install() {\n  export LD_PRELOAD=/tmp/evil.so\n}";
+        let findings = rules.evaluate("hook.install", install_text);
+        assert!(findings.iter().any(|f| f.rule_id == "install-ld-preload"));
+    }
+
+    #[test]
+    fn install_setuid_flagged() {
+        let rules = RuleSet::builtin();
+        let install_text = "post_install() {\n  chmod u+s /usr/bin/foo\n}";
+        let findings = rules.evaluate("hook.install", install_text);
+        assert!(findings.iter().any(|f| f.rule_id == "install-setuid"));
     }
 }

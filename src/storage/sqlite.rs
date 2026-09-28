@@ -4,8 +4,8 @@ use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-use crate::core::types::{MaintainerChange, PackageSnapshot};
-use crate::storage::models::{DecisionRecord, ThreatIndicator};
+use crate::core::types::{MaintainerChange, PackageSnapshot, Verdict};
+use crate::storage::models::{CachedScan, DecisionRecord, FeedState, ThreatIndicator};
 
 #[derive(Debug, thiserror::Error)]
 pub enum StorageError {
@@ -98,7 +98,26 @@ impl Database {
                 current TEXT,
                 kind TEXT NOT NULL,
                 severity TEXT NOT NULL
-            );",
+            );
+            CREATE TABLE IF NOT EXISTS feed_state (
+                url TEXT PRIMARY KEY,
+                etag TEXT,
+                last_modified TEXT,
+                last_success INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE IF NOT EXISTS scan_cache (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                package_name TEXT NOT NULL,
+                fingerprint TEXT NOT NULL,
+                breakdown TEXT NOT NULL,
+                findings TEXT NOT NULL,
+                verdict TEXT NOT NULL,
+                reasons TEXT NOT NULL,
+                snapshot TEXT NOT NULL,
+                timestamp INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_scan_cache
+                ON scan_cache(package_name, fingerprint, timestamp);",
         )?;
         Ok(())
     }
@@ -188,6 +207,58 @@ impl Database {
             .map_err(StorageError::from)
     }
 
+    pub fn save_scan_cache(&self, cache: &CachedScan) -> Result<(), StorageError> {
+        self.conn.execute(
+            "INSERT INTO scan_cache (
+                package_name, fingerprint, breakdown, findings, verdict, reasons, snapshot, timestamp
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                cache.package,
+                cache.fingerprint,
+                encode(&cache.breakdown)?,
+                encode(&cache.findings)?,
+                encode(&cache.verdict)?,
+                encode(&cache.reasons)?,
+                encode(&cache.snapshot)?,
+                cache.timestamp,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_valid_scan_cache(
+        &self,
+        package: &str,
+        fingerprint: &str,
+        max_age_seconds: i64,
+    ) -> Result<Option<CachedScan>, StorageError> {
+        let minimum_timestamp = chrono::Utc::now()
+            .timestamp()
+            .saturating_sub(max_age_seconds);
+        self.conn
+            .query_row(
+                "SELECT package_name, fingerprint, breakdown, findings, verdict, reasons, snapshot, timestamp
+                 FROM scan_cache
+                 WHERE package_name = ?1 AND fingerprint = ?2 AND timestamp >= ?3
+                 ORDER BY timestamp DESC, id DESC LIMIT 1",
+                params![package, fingerprint, minimum_timestamp],
+                |row| {
+                    Ok(CachedScan {
+                        package: row.get(0)?,
+                        fingerprint: row.get(1)?,
+                        breakdown: decode(row, 2)?,
+                        findings: decode(row, 3)?,
+                        verdict: decode(row, 4)?,
+                        reasons: decode(row, 5)?,
+                        snapshot: decode(row, 6)?,
+                        timestamp: row.get(7)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(StorageError::from)
+    }
+
     pub fn store_indicator(&self, ioc: &ThreatIndicator) -> Result<(), StorageError> {
         self.conn.execute(
             "INSERT INTO threat_indicators (
@@ -270,6 +341,88 @@ impl Database {
         })?;
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(StorageError::from)
+    }
+
+    pub fn save_feed_state(&self, state: &FeedState) -> Result<(), StorageError> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO feed_state (url, etag, last_modified, last_success)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                state.url,
+                state.etag,
+                state.last_modified,
+                state.last_success
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_feed_state(&self, url: &str) -> Result<Option<FeedState>, StorageError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT url, etag, last_modified, last_success FROM feed_state WHERE url = ?1",
+        )?;
+        let state = stmt
+            .query_row(params![url], |row| {
+                Ok(FeedState {
+                    url: row.get(0)?,
+                    etag: row.get(1)?,
+                    last_modified: row.get(2)?,
+                    last_success: row.get(3)?,
+                })
+            })
+            .optional()
+            .map_err(StorageError::from)?;
+        Ok(state)
+    }
+}
+
+/// Summary of decisions in a time range.
+#[derive(Debug, Clone)]
+pub struct DecisionSummary {
+    pub total: u32,
+    pub allowed: u32,
+    pub warned: u32,
+    pub quarantined: u32,
+    pub blocked: u32,
+}
+
+impl Database {
+    /// Count decisions grouped by verdict within [from_ts, to_ts].
+    pub fn decision_summary(
+        &self,
+        from_ts: i64,
+        to_ts: i64,
+    ) -> Result<DecisionSummary, StorageError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT verdict, COUNT(*) FROM policy_decisions
+             WHERE timestamp BETWEEN ?1 AND ?2
+             GROUP BY verdict",
+        )?;
+        let rows = stmt.query_map(params![from_ts, to_ts], |row| {
+            let verdict: String = row.get(0)?;
+            let count: u32 = row.get(1)?;
+            Ok((verdict, count))
+        })?;
+
+        let mut summary = DecisionSummary {
+            total: 0,
+            allowed: 0,
+            warned: 0,
+            quarantined: 0,
+            blocked: 0,
+        };
+        for row in rows {
+            let (verdict_raw, count) = row?;
+            let verdict: Verdict = serde_json::from_str(&verdict_raw).unwrap_or(Verdict::Allow);
+            summary.total += count;
+            match verdict {
+                Verdict::Allow => summary.allowed += count,
+                Verdict::Warn => summary.warned += count,
+                Verdict::Quarantine => summary.quarantined += count,
+                Verdict::Block => summary.blocked += count,
+            }
+        }
+        Ok(summary)
     }
 }
 
@@ -443,6 +596,51 @@ mod tests {
     }
 
     #[test]
+    fn feed_state_roundtrip() {
+        let db = Database::open_in_memory().unwrap();
+        let state = crate::storage::FeedState {
+            url: "https://example.com/iocs.json".to_string(),
+            etag: Some("\"v1\"".to_string()),
+            last_modified: Some("Sat, 20 Sep 2026 12:00:00 GMT".to_string()),
+            last_success: 1_700_000_000,
+        };
+
+        assert!(db.get_feed_state(&state.url).unwrap().is_none());
+        db.save_feed_state(&state).unwrap();
+        assert_eq!(db.get_feed_state(&state.url).unwrap(), Some(state));
+    }
+
+    #[test]
+    fn decision_counts_within_time_range() {
+        let db = Database::open_in_memory().unwrap();
+        for (package, verdict_str, timestamp) in [
+            ("alpha", "Allow", 100),
+            ("blocked-pkg", "Block", 101),
+            ("old-pkg", "Block", 1),
+        ] {
+            let verdict: Verdict = match verdict_str {
+                "Warn" => Verdict::Warn,
+                "Quarantine" => Verdict::Quarantine,
+                "Block" => Verdict::Block,
+                _ => Verdict::Allow,
+            };
+            db.record_decision(&DecisionRecord {
+                package: package.into(),
+                score: 0,
+                verdict,
+                reasons: vec![],
+                timestamp,
+            })
+            .unwrap();
+        }
+
+        let summary = db.decision_summary(100, 102).unwrap();
+        assert_eq!(summary.total, 2);
+        assert_eq!(summary.blocked, 1);
+        assert_eq!(summary.allowed, 1);
+    }
+
+    #[test]
     fn maintainer_change_roundtrip() {
         let db = Database::open_in_memory().unwrap();
         db.save_maintainer_change(&MaintainerChange {
@@ -496,5 +694,53 @@ mod tests {
 
         drop(db);
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn scan_cache_hit_miss_and_expiration() {
+        let db = Database::open_in_memory().unwrap();
+        let snap = snapshot("ripgrep-all", "0.10.0", 1000);
+        let cache_entry = CachedScan {
+            package: "ripgrep-all".to_string(),
+            fingerprint: "fp-v1-hash123".to_string(),
+            breakdown: crate::core::types::ScoreBreakdown::default(),
+            findings: Vec::new(),
+            verdict: Verdict::Allow,
+            reasons: vec!["clean".to_string()],
+            snapshot: snap,
+            timestamp: chrono::Utc::now().timestamp(),
+        };
+
+        db.save_scan_cache(&cache_entry).unwrap();
+
+        // Hit: fingerprint sama & dalam TTL 900s
+        let hit = db
+            .get_valid_scan_cache("ripgrep-all", "fp-v1-hash123", 900)
+            .unwrap();
+        assert!(hit.is_some());
+        assert_eq!(hit.unwrap().verdict, Verdict::Allow);
+
+        // Miss: fingerprint beda
+        let miss_fp = db
+            .get_valid_scan_cache("ripgrep-all", "fp-v2-different", 900)
+            .unwrap();
+        assert!(miss_fp.is_none());
+
+        // Miss: nama paket beda
+        let miss_pkg = db
+            .get_valid_scan_cache("other-pkg", "fp-v1-hash123", 900)
+            .unwrap();
+        assert!(miss_pkg.is_none());
+
+        // Expired: entry dengan timestamp 1000 detik lalu (max age 900)
+        let mut expired_entry = cache_entry;
+        expired_entry.package = "expired-pkg".to_string();
+        expired_entry.timestamp = chrono::Utc::now().timestamp() - 1000;
+        db.save_scan_cache(&expired_entry).unwrap();
+
+        let expired = db
+            .get_valid_scan_cache("expired-pkg", "fp-v1-hash123", 900)
+            .unwrap();
+        assert!(expired.is_none());
     }
 }

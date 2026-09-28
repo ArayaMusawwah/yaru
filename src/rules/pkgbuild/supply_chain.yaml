@@ -187,3 +187,64 @@
   contains_all: []
   enabled: true
   score: 20
+
+# Install-specific rules (run on *.install files)
+- id: install-systemd-persistence
+  name: Install Systemd Service Installation
+  description: Installs and enables systemd service units in .install hook
+  category: persistence
+  severity: critical
+  pattern: ""
+  contains_all: ["systemctl", "enable"]
+  enabled: true
+  score: 50
+
+- id: install-cron-persistence
+  name: Install Crontab Persistence
+  description: Modifies crontab in .install hook for scheduled persistence
+  category: persistence
+  severity: high
+  pattern: "crontab"
+  contains_all: []
+  enabled: true
+  score: 40
+
+- id: install-sudoers-modification
+  name: Install Sudoers Modification
+  description: Modifies sudoers in .install hook for privilege escalation
+  category: persistence
+  severity: critical
+  pattern: "/etc/sudoers"
+  contains_all: []
+  enabled: true
+  score: 50
+
+- id: install-shell-rc-modification
+  name: Install Shell RC Modification
+  description: Modifies shell startup files in .install hook
+  category: persistence
+  severity: high
+  pattern: ".bashrc"
+  contains_all: []
+  enabled: true
+  score: 40
+
+- id: install-ld-preload
+  name: Install LD_PRELOAD Injection
+  description: Sets LD_PRELOAD in .install hook for code injection
+  category: persistence
+  severity: critical
+  pattern: "LD_PRELOAD"
+  contains_all: []
+  enabled: true
+  score: 50
+
+- id: install-setuid
+  name: Install SetUID/SGID Modification
+  description: Sets SUID/SGID bits in .install hook
+  category: privilege-escalation
+  severity: critical
+  pattern: "chmod u+s"
+  contains_all: []
+  enabled: true
+  score: 50

@@ -3,6 +3,13 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GatewayMode {
+    Default,
+    Interactive,
+    AutoSkip,
+}
+
 /// Classified invocation of a paru/pacman command.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GatewayAction {
@@ -14,6 +21,7 @@ pub enum GatewayAction {
         passthrough_flags: Vec<String>,
         allowed_packages: Vec<String>,
         cleaned_args: Vec<String>,
+        mode: GatewayMode,
     },
     /// System upgrade operation (-Syu, -Syyu, -u, or bare `paru`): requires querying
     /// out-of-date AUR packages and evaluating them before proceeding.
@@ -21,6 +29,7 @@ pub enum GatewayAction {
         passthrough_flags: Vec<String>,
         allowed_packages: Vec<String>,
         cleaned_args: Vec<String>,
+        mode: GatewayMode,
     },
 }
 
@@ -32,6 +41,7 @@ pub fn parse_gateway_args(args: &[String]) -> GatewayAction {
             passthrough_flags: Vec::new(),
             allowed_packages: Vec::new(),
             cleaned_args: Vec::new(),
+            mode: GatewayMode::Default,
         };
     }
 
@@ -41,12 +51,21 @@ pub fn parse_gateway_args(args: &[String]) -> GatewayAction {
     let mut passthrough_flags = Vec::new();
     let mut allowed_packages = Vec::new();
     let mut cleaned_args = Vec::new();
+    let mut mode = GatewayMode::Default;
 
     let mut i = 0;
     while i < args.len() {
         let arg = &args[i];
 
-        if arg == "--allow" || arg == "--allow-pkg" {
+        if arg == "--interactive" || arg == "-i" {
+            mode = GatewayMode::Interactive;
+            i += 1;
+            continue;
+        } else if arg == "--auto-skip" || arg == "--skip-blocked" {
+            mode = GatewayMode::AutoSkip;
+            i += 1;
+            continue;
+        } else if arg == "--allow" || arg == "--allow-pkg" {
             if i + 1 < args.len() {
                 allowed_packages.push(args[i + 1].clone());
                 i += 2;
@@ -87,12 +106,14 @@ pub fn parse_gateway_args(args: &[String]) -> GatewayAction {
             passthrough_flags,
             allowed_packages,
             cleaned_args,
+            mode,
         }
     } else if is_upgrade || (is_sync && packages.is_empty()) {
         GatewayAction::EvaluateUpgrade {
             passthrough_flags,
             allowed_packages,
             cleaned_args,
+            mode,
         }
     } else {
         GatewayAction::Forward
@@ -176,6 +197,17 @@ impl Default for GatewayDecision {
     fn default() -> Self {
         Self::new()
     }
+}
+
+pub fn append_ignored_packages(args: &[String], packages: &[String]) -> Vec<String> {
+    let mut result = args.to_vec();
+    for package in packages {
+        if !result.windows(2).any(|pair| pair == ["--ignore", package]) {
+            result.push("--ignore".into());
+            result.push(package.clone());
+        }
+    }
+    result
 }
 
 /// Spawns the real paru binary with passthrough arguments.
@@ -311,5 +343,46 @@ google-chrome 153.0.8010.36-1 -> 153.0.8010.47-1
         assert!(d.proceed);
         assert_eq!(d.fast_path_packages.len(), 2);
         assert!(d.blocked_packages.is_empty());
+    }
+
+    #[test]
+    fn parses_interactive_and_auto_skip_flags() {
+        let args: Vec<String> = vec!["-Syyu".into(), "--auto-skip".into()];
+        match parse_gateway_args(&args) {
+            GatewayAction::EvaluateUpgrade {
+                mode, cleaned_args, ..
+            } => {
+                assert_eq!(mode, GatewayMode::AutoSkip);
+                assert_eq!(cleaned_args, vec!["-Syyu"]);
+            }
+            _ => panic!("expected EvaluateUpgrade"),
+        }
+
+        let args: Vec<String> = vec!["-Syyu".into(), "--interactive".into()];
+        match parse_gateway_args(&args) {
+            GatewayAction::EvaluateUpgrade {
+                mode, cleaned_args, ..
+            } => {
+                assert_eq!(mode, GatewayMode::Interactive);
+                assert_eq!(cleaned_args, vec!["-Syyu"]);
+            }
+            _ => panic!("expected EvaluateUpgrade"),
+        }
+    }
+
+    #[test]
+    fn appends_ignored_packages_without_duplicates() {
+        let base = vec!["-Syyu".into()];
+        let blocked = vec!["winpodx".into(), "bad-pkg".into()];
+        let updated = append_ignored_packages(&base, &blocked);
+        assert_eq!(
+            updated,
+            vec!["-Syyu", "--ignore", "winpodx", "--ignore", "bad-pkg"]
+        );
+
+        assert_eq!(
+            updated,
+            append_ignored_packages(&updated, &["winpodx".into()])
+        );
     }
 }

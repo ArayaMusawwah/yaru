@@ -119,6 +119,7 @@ pub fn scan_output(stdout: &str, stderr: &str) -> BehaviorReport {
                     file: "sandbox-output".to_string(),
                     line: index + 1,
                     excerpt: line.trim().chars().take(160).collect(),
+                    scope: crate::core::types::FindingScope::Pkgbuild,
                 });
                 report.events.push(BehaviorEvent {
                     event_type: rule.category.clone(),

@@ -103,10 +103,37 @@ mod tests {
             .unwrap();
         assert_eq!(finding.line, 4);
     }
+
+    #[test]
+    fn install_hash_changes_when_install_file_changes() {
+        let dir1 = write_fixture("pkgname=foo\n", Some("post_install() {\n  echo v1\n}\n"));
+        let dir2 = write_fixture("pkgname=foo\n", Some("post_install() {\n  echo v2\n}\n"));
+        let r1 = analyze_pkgbuild_dir(dir1.path(), &RuleSet::builtin()).unwrap();
+        let r2 = analyze_pkgbuild_dir(dir2.path(), &RuleSet::builtin()).unwrap();
+        assert_ne!(r1.install_hash, r2.install_hash);
+        // PKGBUILD identical, so pkgbuild_hash should match
+        assert_eq!(r1.pkgbuild_hash, r2.pkgbuild_hash);
+    }
+
+    #[test]
+    fn install_scope_tag_on_install_rules() {
+        let dir = write_fixture(
+            "pkgname=foo\n",
+            Some("post_install() {\n  chmod u+s /usr/bin/foo\n}\n"),
+        );
+        let result = analyze_pkgbuild_dir(dir.path(), &RuleSet::builtin()).unwrap();
+        let finding = result
+            .findings
+            .iter()
+            .find(|finding| finding.rule_id == "install-setuid")
+            .unwrap();
+        assert_eq!(finding.scope, crate::core::types::FindingScope::Install);
+    }
 }
 
 use super::deobfuscate::findings_from_encoded;
 use super::rules::RuleSet;
+use crate::core::source_integrity::assess_sources;
 use crate::core::types::Finding;
 use sha2::{Digest, Sha256};
 
@@ -119,6 +146,7 @@ pub struct PkgbuildAnalysis {
     pub source_urls: Vec<String>,
     pub findings: Vec<Finding>,
     pub pkgbuild_hash: String,
+    pub install_hash: String,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -155,21 +183,38 @@ pub fn analyze_pkgbuild_dir(
             install_files.push((file, install_text));
         }
     }
-    let mut hasher = Sha256::new();
-    hasher.update(text.as_bytes());
-    let pkgbuild_hash = hex::encode(hasher.finalize());
+    let mut pkgbuild_hasher = Sha256::new();
+    pkgbuild_hasher.update(text.as_bytes());
+    let pkgbuild_hash = hex::encode(pkgbuild_hasher.finalize());
+
+    let mut install_hasher = Sha256::new();
+    for (_, content) in &install_files {
+        install_hasher.update(content.as_bytes());
+    }
+    let install_hash = hex::encode(install_hasher.finalize());
+
+    let sources: Vec<String> = assignment_array(&text, "source")
+        .into_iter()
+        .filter(|value| value.contains("://") || value.starts_with("git+"))
+        .collect();
+    let sha256sums = assignment_array(&text, "sha256sums");
+    let has_sha256sums = sha256sums.iter().any(|value| !value.starts_with("SKIP"));
+    for assessment in assess_sources(&sources, has_sha256sums) {
+        if let Some(finding) = assessment.finding {
+            findings.push(finding);
+        }
+    }
+
     Ok(PkgbuildAnalysis {
         package_name: assignment_value(&text, "pkgname"),
         version: assignment_value(&text, "pkgver"),
         depends: assignment_array(&text, "depends"),
         makedepends: assignment_array(&text, "makedepends"),
         checkdepends: assignment_array(&text, "checkdepends"),
-        source_urls: assignment_array(&text, "source")
-            .into_iter()
-            .filter(|value| value.contains("://") || value.starts_with("git+"))
-            .collect(),
+        source_urls: sources,
         findings,
         pkgbuild_hash,
+        install_hash,
     })
 }
 
