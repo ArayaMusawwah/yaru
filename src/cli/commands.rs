@@ -286,6 +286,10 @@ async fn evaluate_and_forward(
     let policy = crate::core::policy::PolicyEngine::with_whitelist(cfg.whitelisted_rules.clone());
     let aur = AurClient::new();
     let mut decision = GatewayDecision::new();
+    let mut audit_details: std::collections::HashMap<
+        String,
+        (Vec<crate::core::types::Finding>, Vec<String>),
+    > = std::collections::HashMap::new();
 
     for pkg in packages {
         if allowed_packages.contains(pkg) {
@@ -317,6 +321,7 @@ async fn evaluate_and_forward(
                 &[],
             );
             output::print_report_card(&report);
+            audit_details.insert(pkg.clone(), (report.findings.clone(), report.reasons.clone()));
             decision.record(
                 pkg,
                 classification.zone,
@@ -359,6 +364,7 @@ async fn evaluate_and_forward(
 
         if let Some(report) = cached_report {
             output::print_report_card(&report);
+            audit_details.insert(pkg.clone(), (report.findings.clone(), report.reasons.clone()));
             decision.record(
                 pkg,
                 TrustZone::Aur,
@@ -374,9 +380,6 @@ async fn evaluate_and_forward(
             .map_err(|e| anyhow!("analysis failed for {pkg}: {e}"))?;
         // Include install_hash: .install changes invalidate cache even when version is same
         let fingerprint = format!("{fingerprint}:{}", analysis.install_hash);
-        let rules = crate::core::analyzer::RuleSet::builtin();
-        let analysis = crate::core::analyzer::analyze_pkgbuild_dir(&dir, &rules)
-            .map_err(|e| anyhow!("analysis failed for {pkg}: {e}"))?;
         let snapshot = crate::core::types::PackageSnapshot {
             package_name: analysis.package_name.clone().unwrap_or_else(|| pkg.clone()),
             version: analysis.version.clone(),
@@ -423,6 +426,7 @@ async fn evaluate_and_forward(
         }
 
         output::print_report_card(&report);
+        audit_details.insert(pkg.clone(), (report.findings.clone(), report.reasons.clone()));
         decision.record(
             pkg,
             TrustZone::Aur,
@@ -477,11 +481,33 @@ async fn evaluate_and_forward(
                     match crate::cli::prompt::ask(&mut out, &mut input)? {
                         Some(crate::cli::prompt::GatewayChoice::Skip) => break true,
                         Some(crate::cli::prompt::GatewayChoice::Details) => {
+                            writeln!(
+                                out,
+                                "\n{}",
+                                "── Detailed Audit Findings ──────────────────────────────────".cyan().bold()
+                            )?;
                             for (pkg, reason) in &to_resolve {
                                 if blocked.contains(pkg) {
-                                    println!("  [X] {pkg}: {reason}");
+                                    writeln!(
+                                        out,
+                                        "\n  {} {}",
+                                        "[!]".yellow().bold(),
+                                        pkg.bold().white()
+                                    )?;
+                                    if let Some((findings, reasons)) = audit_details.get(pkg) {
+                                        if !findings.is_empty() {
+                                            output::print_findings(findings);
+                                        }
+                                        output::print_source_integrity(findings);
+                                        if !reasons.is_empty() {
+                                            output::print_reasons(reasons);
+                                        }
+                                    } else {
+                                        writeln!(out, "  [X] {pkg}: {reason}")?;
+                                    }
                                 }
                             }
+                            writeln!(out)?;
                         }
                         Some(crate::cli::prompt::GatewayChoice::Allow) => {
                             match crate::cli::prompt::select_package(
