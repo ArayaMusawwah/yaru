@@ -443,20 +443,23 @@ async fn evaluate_and_forward(
         println!("  {} {pkg}: {reason}", "[!]".yellow());
     }
 
-    // WARN honors policy: non-interactive gateway cannot ask, so
-    // on_warn = block refuses the whole batch.
-    if !decision.warnings.is_empty() && cfg.policy.on_warn == crate::config::WarnAction::Block {
-        anyhow::bail!("yaru gateway refused: WARN verdict(s) present with policy on_warn = block");
+    let mut final_args = forward_args.to_vec();
+
+    // Determine all packages that must not proceed automatically.
+    // If on_warn = block, WARN packages are also treated as requiring user resolution.
+    let mut to_resolve: Vec<(String, String)> = decision.blocked_packages.clone();
+    if cfg.policy.on_warn == crate::config::WarnAction::Block {
+        for (pkg, reason) in &decision.warnings {
+            to_resolve.push((pkg.clone(), format!("WARN: {reason}")));
+        }
     }
 
-    let mut final_args = forward_args.to_vec();
-    if !decision.proceed {
-        for (pkg, reason) in &decision.blocked_packages {
+    if !to_resolve.is_empty() {
+        for (pkg, reason) in &to_resolve {
             println!("  {} {pkg} BLOCKED: {reason}", "[X]".red());
         }
 
-        let mut blocked: Vec<String> = decision
-            .blocked_packages
+        let mut blocked: Vec<String> = to_resolve
             .iter()
             .map(|(pkg, _)| pkg.clone())
             .collect();
@@ -474,7 +477,7 @@ async fn evaluate_and_forward(
                     match crate::cli::prompt::ask(&mut out, &mut input)? {
                         Some(crate::cli::prompt::GatewayChoice::Skip) => break true,
                         Some(crate::cli::prompt::GatewayChoice::Details) => {
-                            for (pkg, reason) in &decision.blocked_packages {
+                            for (pkg, reason) in &to_resolve {
                                 if blocked.contains(pkg) {
                                     println!("  [X] {pkg}: {reason}");
                                 }
@@ -488,7 +491,7 @@ async fn evaluate_and_forward(
                                     let pkg = blocked[idx].clone();
                                     writeln!(
                                         out,
-                                        "  [!] {pkg} has CRITICAL findings. Allowing bypasses security checks for this run."
+                                        "  [!] Allowing {pkg} bypasses security checks for this run."
                                     )?;
                                     if crate::cli::prompt::confirm(&mut out, &mut input)? {
                                         writeln!(out, "  {} {pkg}: allowed once", "[OK]".green())?;
@@ -508,7 +511,7 @@ async fn evaluate_and_forward(
         };
 
         if !should_skip {
-            anyhow::bail!("yaru gateway refused to forward: blocked package(s) present");
+            anyhow::bail!("yaru gateway refused to forward: blocked/warned package(s) present");
         }
         final_args = crate::interceptor::append_ignored_packages(&final_args, &blocked);
         println!("  [!] Skipping blocked package(s): {}", blocked.join(", "));
