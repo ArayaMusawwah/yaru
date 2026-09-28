@@ -10,11 +10,14 @@ pub struct SecurityReport {
     pub warned: u32,
     pub quarantined: u32,
     pub blocked: u32,
+    #[serde(default)]
+    pub cache_hits: u32,
 }
 
 impl SecurityReport {
     pub fn build(db: &Database, from_ts: i64, to_ts: i64) -> Result<Self, StorageError> {
         let summary = db.decision_summary(from_ts, to_ts)?;
+        let cache_hits = db.count_cache_hits(from_ts, to_ts)?;
         Ok(SecurityReport {
             from: from_ts,
             to: to_ts,
@@ -23,6 +26,7 @@ impl SecurityReport {
             warned: summary.warned,
             quarantined: summary.quarantined,
             blocked: summary.blocked,
+            cache_hits,
         })
     }
 }
@@ -68,5 +72,10 @@ mod tests {
         assert_eq!(report.allowed, 1);
         assert_eq!(report.blocked, 1);
         assert_eq!(report.warned, 1);
+        assert_eq!(report.cache_hits, 0);
+
+        db.record_cache_hit_at("cached-pkg", now - 10).unwrap();
+        let report2 = SecurityReport::build(&db, now - 200, now).unwrap();
+        assert_eq!(report2.cache_hits, 1);
     }
 }

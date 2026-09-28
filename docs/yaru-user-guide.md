@@ -664,6 +664,19 @@ yaru build /path/to/pkgbuild
 yaru sandbox /path/to/pkgbuild /usr/bin/makepkg --noconfirm
 # IOC
 yaru ioc import /path/to/feed.json
+yaru ioc sync
+yaru ioc sync https://example.com/iocs.json
+# Allow rule
+yaru allow-rule <rule-id>
+yaru allow-rule remove <rule-id>
+# Report
+yaru report --today
+yaru report --days 7 --json
+# Systemd user timer (opsional)
+mkdir -p ~/.config/systemd/user
+cp packaging/systemd/yaru-ioc-sync.{service,timer} ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now yaru-ioc-sync.timer
 # Paru gateway
 yaru gateway --dry-run -S <pkg>
 yaru gateway -S <pkg>

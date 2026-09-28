@@ -117,7 +117,14 @@ impl Database {
                 timestamp INTEGER NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_scan_cache
-                ON scan_cache(package_name, fingerprint, timestamp);",
+                ON scan_cache(package_name, fingerprint, timestamp);
+            CREATE TABLE IF NOT EXISTS scan_cache_hits (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                package_name TEXT NOT NULL,
+                timestamp INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_scan_cache_hits
+                ON scan_cache_hits(timestamp);",
         )?;
         Ok(())
     }
@@ -423,6 +430,27 @@ impl Database {
             }
         }
         Ok(summary)
+    }
+
+    pub fn record_cache_hit(&self, package: &str) -> Result<(), StorageError> {
+        self.record_cache_hit_at(package, chrono::Utc::now().timestamp())
+    }
+
+    pub fn record_cache_hit_at(&self, package: &str, timestamp: i64) -> Result<(), StorageError> {
+        self.conn.execute(
+            "INSERT INTO scan_cache_hits (package_name, timestamp) VALUES (?1, ?2)",
+            params![package, timestamp],
+        )?;
+        Ok(())
+    }
+
+    pub fn count_cache_hits(&self, from_ts: i64, to_ts: i64) -> Result<u32, StorageError> {
+        let count: u32 = self.conn.query_row(
+            "SELECT COUNT(*) FROM scan_cache_hits WHERE timestamp BETWEEN ?1 AND ?2",
+            params![from_ts, to_ts],
+            |row| row.get(0),
+        )?;
+        Ok(count)
     }
 }
 
@@ -742,5 +770,17 @@ mod tests {
             .get_valid_scan_cache("expired-pkg", "fp-v1-hash123", 900)
             .unwrap();
         assert!(expired.is_none());
+    }
+
+    #[test]
+    fn record_and_count_cache_hits() {
+        let db = Database::open_in_memory().unwrap();
+        let now = chrono::Utc::now().timestamp();
+        db.record_cache_hit_at("pkg-a", now - 50).unwrap();
+        db.record_cache_hit_at("pkg-b", now - 20).unwrap();
+        db.record_cache_hit_at("pkg-old", now - 500).unwrap();
+
+        let count = db.count_cache_hits(now - 100, now).unwrap();
+        assert_eq!(count, 2);
     }
 }

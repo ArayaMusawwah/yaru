@@ -30,8 +30,16 @@ pub enum Command {
     History { package: String },
     /// Show reputation/trust view of a package
     Trust { package: String },
-    /// Whitelist a rule id for this machine
-    AllowRule { rule: String },
+    /// Whitelist a rule id for this machine (or remove with 'remove <rule>' or '--remove')
+    AllowRule {
+        /// Rule ID to whitelist, or 'remove' to remove a rule
+        rule: String,
+        /// Target rule ID when using 'allow-rule remove <rule>'
+        target: Option<String>,
+        /// Remove rule from whitelist instead of adding
+        #[arg(long)]
+        remove: bool,
+    },
     /// Inspect a local PKGBUILD directory
     InspectLocal { dir: String },
     /// Run a command inside an isolated bwrap sandbox for a PKGBUILD directory

@@ -119,6 +119,51 @@ fn test_cli_allow_rule_persists_in_config() {
 }
 
 #[test]
+fn test_cli_allow_rule_remove_removes_from_config() {
+    let tmp = tempdir().unwrap();
+    let mut add_cmd = Command::cargo_bin("yaru").unwrap();
+    add_cmd
+        .env("YARU_CONFIG_DIR", tmp.path().to_str().unwrap())
+        .env("HOME", tmp.path().to_str().unwrap())
+        .arg("allow-rule")
+        .arg("remote-shell-download");
+    add_cmd.assert().success();
+
+    let mut rm_cmd = Command::cargo_bin("yaru").unwrap();
+    rm_cmd
+        .env("YARU_CONFIG_DIR", tmp.path().to_str().unwrap())
+        .env("HOME", tmp.path().to_str().unwrap())
+        .arg("allow-rule")
+        .arg("remove")
+        .arg("remote-shell-download");
+    rm_cmd.assert().success();
+
+    let content = fs::read_to_string(tmp.path().join("config.toml")).unwrap_or_default();
+    assert!(!content.contains("remote-shell-download"));
+
+    // Also test --remove flag
+    let mut add_again = Command::cargo_bin("yaru").unwrap();
+    add_again
+        .env("YARU_CONFIG_DIR", tmp.path().to_str().unwrap())
+        .env("HOME", tmp.path().to_str().unwrap())
+        .arg("allow-rule")
+        .arg("remote-shell-download");
+    add_again.assert().success();
+
+    let mut rm_flag = Command::cargo_bin("yaru").unwrap();
+    rm_flag
+        .env("YARU_CONFIG_DIR", tmp.path().to_str().unwrap())
+        .env("HOME", tmp.path().to_str().unwrap())
+        .arg("allow-rule")
+        .arg("--remove")
+        .arg("remote-shell-download");
+    rm_flag.assert().success();
+
+    let content_after = fs::read_to_string(tmp.path().join("config.toml")).unwrap_or_default();
+    assert!(!content_after.contains("remote-shell-download"));
+}
+
+#[test]
 fn test_cli_sandbox_runs_clean_command() {
     let tmp = tempdir().unwrap();
     let mut cmd = Command::cargo_bin("yaru").unwrap();
@@ -334,5 +379,21 @@ fn test_cli_report_today_json() {
     cmd.assert()
         .success()
         .stdout(predicate::str::contains("scanned"))
-        .stdout(predicate::str::contains("blocked"));
+        .stdout(predicate::str::contains("blocked"))
+        .stdout(predicate::str::contains("cache_hits"));
+}
+
+#[test]
+fn test_cli_report_today_human() {
+    let tmp = tempdir().unwrap();
+    let mut cmd = Command::cargo_bin("yaru").unwrap();
+    cmd.env("YARU_DB_PATH", tmp.path().join("yaru.db"))
+        .arg("report")
+        .arg("--today");
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("Security report (today)"))
+        .stdout(predicate::str::contains("Scanned"))
+        .stdout(predicate::str::contains("Blocked"))
+        .stdout(predicate::str::contains("Cache hits"));
 }

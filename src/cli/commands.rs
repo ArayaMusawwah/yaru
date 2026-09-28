@@ -20,7 +20,25 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::Explain { package } => explain(&package),
         Command::History { package } => history(&package),
         Command::Trust { package } => trust(&package).await,
-        Command::AllowRule { rule } => allow_rule(&rule),
+        Command::AllowRule {
+            rule,
+            target,
+            remove,
+        } => {
+            if rule == "remove" {
+                if let Some(target_rule) = target {
+                    remove_rule(&target_rule)
+                } else {
+                    anyhow::bail!(
+                        "missing rule ID to remove; usage: yaru allow-rule remove <rule-id>"
+                    );
+                }
+            } else if remove {
+                remove_rule(&rule)
+            } else {
+                allow_rule(&rule)
+            }
+        }
         Command::InspectLocal { dir } => inspect_local(Path::new(&dir), true).await,
         Command::Sandbox { dir, command } => sandbox_run(&dir, &command).await,
         Command::Build { dir, dry_run } => build(&dir, dry_run).await,
@@ -334,6 +352,7 @@ async fn evaluate_and_forward(
                     verdict: cached.verdict,
                     reasons: cached.reasons,
                 };
+                let _ = db.record_cache_hit(pkg);
                 cached_report = Some(report);
             }
         }
@@ -916,6 +935,7 @@ fn report(today: bool, days: Option<u64>, json: bool) -> Result<()> {
     println!("  Warned       : {}", rep.warned);
     println!("  Quarantined  : {}", rep.quarantined);
     println!("  Blocked      : {}", rep.blocked);
+    println!("  Cache hits   : {}", rep.cache_hits);
     Ok(())
 }
 
@@ -963,6 +983,31 @@ fn allow_rule(rule: &str) -> Result<()> {
     }
     std::fs::write(&path, toml::to_string_pretty(&cfg)?)?;
     println!("  Whitelisted rule '{}' in {}", rule, path.display());
+    Ok(())
+}
+
+fn remove_rule(rule: &str) -> Result<()> {
+    let dir = if let Ok(d) = std::env::var("YARU_CONFIG_DIR") {
+        PathBuf::from(d)
+    } else {
+        dirs::config_dir()
+            .ok_or_else(|| anyhow!("no config dir"))?
+            .join("yaru")
+    };
+    let path = dir.join("config.toml");
+    if !path.exists() {
+        println!("  No config file found at {}", path.display());
+        return Ok(());
+    }
+    let mut cfg = config::load()?;
+    let before_len = cfg.whitelisted_rules.len();
+    cfg.whitelisted_rules.retain(|r| r != rule);
+    if cfg.whitelisted_rules.len() < before_len {
+        std::fs::write(&path, toml::to_string_pretty(&cfg)?)?;
+        println!("  Removed rule '{}' from {}", rule, path.display());
+    } else {
+        println!("  Rule '{}' was not in {}", rule, path.display());
+    }
     Ok(())
 }
 

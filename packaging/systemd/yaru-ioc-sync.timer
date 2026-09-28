@@ -1,0 +1,12 @@
+[Unit]
+Description=Periodic Yaru Community IOC Feed Synchronization
+Documentation=https://github.com/ArayaMusawwah/yaru
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=24h
+Persistent=true
+RandomizedDelaySec=30min
+
+[Install]
+WantedBy=timers.target
