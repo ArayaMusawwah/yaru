@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 /// `~/.config/yaru/config.toml` — user-overridable defaults.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct YaruConfig {
     #[serde(default)]
     pub whitelisted_rules: Vec<String>,
@@ -12,6 +12,8 @@ pub struct YaruConfig {
     pub sandbox: SandboxConfig,
     #[serde(default)]
     pub ioc_feed: IocFeedConfig,
+    #[serde(default)]
+    pub ai: AiConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -64,23 +66,12 @@ pub struct SandboxConfig {
     pub network_mode: NetworkMode,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, clap::ValueEnum)]
 pub enum NetworkMode {
     #[default]
     Strict,
     SourceAllowlist,
     Audit,
-}
-
-impl Default for YaruConfig {
-    fn default() -> Self {
-        Self {
-            whitelisted_rules: Vec::new(),
-            policy: PolicyConfig::default(),
-            sandbox: SandboxConfig::default(),
-            ioc_feed: IocFeedConfig::default(),
-        }
-    }
 }
 
 /// Community IOC feed configuration. Disabled by default; the URL is
@@ -107,6 +98,75 @@ impl Default for IocFeedConfig {
 
 fn default_refresh_hours() -> u64 {
     24
+}
+
+/// AI-assisted triage configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AiConfig {
+    #[serde(default = "default_ai_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_ai_provider")]
+    pub provider: String,
+    #[serde(default = "default_ai_base_url")]
+    pub base_url: String,
+    #[serde(default = "default_ai_model")]
+    pub model: String,
+    #[serde(default)]
+    pub api_key: Option<String>,
+    #[serde(default = "default_ai_language")]
+    pub language: String,
+    #[serde(default = "default_ai_timeout_secs")]
+    pub timeout_secs: u64,
+    #[serde(default = "default_ai_cache_ttl_hours")]
+    pub cache_ttl_hours: u64,
+}
+
+fn default_ai_enabled() -> bool {
+    true
+}
+fn default_ai_provider() -> String {
+    "openai".to_string()
+}
+fn default_ai_base_url() -> String {
+    "http://localhost:20128/v1".to_string()
+}
+fn default_ai_model() -> String {
+    "1.beeg-brain".to_string()
+}
+fn default_ai_language() -> String {
+    "id".to_string()
+}
+fn default_ai_timeout_secs() -> u64 {
+    30
+}
+fn default_ai_cache_ttl_hours() -> u64 {
+    72
+}
+
+impl Default for AiConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_ai_enabled(),
+            provider: default_ai_provider(),
+            base_url: default_ai_base_url(),
+            model: default_ai_model(),
+            api_key: None,
+            language: default_ai_language(),
+            timeout_secs: default_ai_timeout_secs(),
+            cache_ttl_hours: default_ai_cache_ttl_hours(),
+        }
+    }
+}
+
+impl AiConfig {
+    pub fn resolved_api_key(&self) -> Option<String> {
+        self.api_key
+            .clone()
+            .or_else(|| std::env::var("YARU_AI_API_KEY").ok())
+            .or_else(|| std::env::var("OPENAI_API_KEY").ok())
+            .map(|k| k.trim().to_string())
+            .filter(|k| !k.is_empty())
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -158,8 +218,11 @@ fn parse(path: &Path) -> Result<YaruConfig, ConfigError> {
 mod tests {
     use super::*;
 
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn missing_file_gives_default() {
+        let _guard = ENV_LOCK.lock().unwrap();
         let tmp = tempfile::tempdir().unwrap();
         unsafe { std::env::set_var("YARU_CONFIG_DIR", tmp.path()) };
         let cfg = load().unwrap();
@@ -170,6 +233,7 @@ mod tests {
 
     #[test]
     fn malformed_config_fails_loud_instead_of_silent_default() {
+        let _guard = ENV_LOCK.lock().unwrap();
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join("config.toml"), b"this is [ not valid toml").unwrap();
         unsafe { std::env::set_var("YARU_CONFIG_DIR", tmp.path()) };
@@ -191,8 +255,9 @@ mod tests {
     #[test]
     fn feed_config_parses_toml() {
         let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
         std::fs::write(
-            tmp.path().join("config.toml"),
+            &path,
             br#"[ioc_feed]
 enabled = true
 url = "https://example.com/iocs.json"
@@ -200,11 +265,60 @@ refresh_hours = 12
 "#,
         )
         .unwrap();
-        unsafe { std::env::set_var("YARU_CONFIG_DIR", tmp.path()) };
-        let cfg = load().unwrap();
-        unsafe { std::env::remove_var("YARU_CONFIG_DIR") };
+        let cfg = parse(&path).unwrap();
         assert!(cfg.ioc_feed.enabled);
         assert_eq!(cfg.ioc_feed.url, "https://example.com/iocs.json");
         assert_eq!(cfg.ioc_feed.refresh_hours, 12);
+    }
+
+    #[test]
+    fn ai_config_defaults() {
+        let cfg = AiConfig::default();
+        assert!(cfg.enabled);
+        assert_eq!(cfg.provider, "openai");
+        assert_eq!(cfg.base_url, "http://localhost:20128/v1");
+        assert_eq!(cfg.model, "1.beeg-brain");
+        assert_eq!(cfg.language, "id");
+        assert_eq!(cfg.timeout_secs, 30);
+        assert_eq!(cfg.cache_ttl_hours, 72);
+        assert_eq!(cfg.api_key, None);
+    }
+
+    #[test]
+    fn ai_config_parses_toml() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            br#"[ai]
+enabled = false
+base_url = "http://127.0.0.1:11434/v1"
+model = "deepseek-r1"
+language = "en"
+cache_ttl_hours = 24
+"#,
+        )
+        .unwrap();
+        let cfg = parse(&path).unwrap();
+        assert!(!cfg.ai.enabled);
+        assert_eq!(cfg.ai.base_url, "http://127.0.0.1:11434/v1");
+        assert_eq!(cfg.ai.model, "deepseek-r1");
+        assert_eq!(cfg.ai.language, "en");
+        assert_eq!(cfg.ai.cache_ttl_hours, 24);
+    }
+
+    #[test]
+    fn ai_config_resolves_env_api_key() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let mut cfg = AiConfig {
+            api_key: Some("cfg-key".into()),
+            ..Default::default()
+        };
+        assert_eq!(cfg.resolved_api_key(), Some("cfg-key".into()));
+
+        cfg.api_key = None;
+        unsafe { std::env::set_var("YARU_AI_API_KEY", "env-key") };
+        assert_eq!(cfg.resolved_api_key(), Some("env-key".into()));
+        unsafe { std::env::remove_var("YARU_AI_API_KEY") };
     }
 }

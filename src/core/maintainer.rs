@@ -101,7 +101,7 @@ mod tests {
             kind: MaintainerChangeKind::Adopted,
             severity: Severity::High, // 30
         };
-        assert_eq!(change_score(&[c1.clone()]), 30);
+        assert_eq!(change_score(std::slice::from_ref(&c1)), 30);
 
         let c2 = MaintainerChange {
             package: "pkg2".to_string(),

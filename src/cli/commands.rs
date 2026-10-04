@@ -17,7 +17,11 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::Status => status(),
         Command::Inspect { package } => inspect(&package, false).await.map(|_| ()),
         Command::Audit { package } => inspect(&package, true).await.map(|_| ()),
-        Command::Explain { package } => explain(&package),
+        Command::Explain {
+            package,
+            ai,
+            refresh,
+        } => explain(&package, ai, refresh).await,
         Command::History { package } => history(&package),
         Command::Trust { package } => trust(&package).await,
         Command::AllowRule {
@@ -40,7 +44,12 @@ pub async fn run(cli: Cli) -> Result<()> {
             }
         }
         Command::InspectLocal { dir } => inspect_local(Path::new(&dir), true).await,
-        Command::Sandbox { dir, command } => sandbox_run(&dir, &command).await,
+        Command::ShouldSandbox { package, dir } => should_sandbox(&package, dir.as_deref()).await,
+        Command::Sandbox {
+            dir,
+            network,
+            command,
+        } => sandbox_run(&dir, network, &command).await,
         Command::Build { dir, dry_run } => build(&dir, dry_run).await,
         Command::Gateway { dry_run, args } => gateway(dry_run, &args).await,
         Command::Report { today, days, json } => report(today, days, json),
@@ -280,6 +289,7 @@ async fn evaluate_and_forward(
 ) -> Result<()> {
     use crate::core::types::Verdict;
     use crate::interceptor::GatewayDecision;
+    use std::io::BufRead;
     use std::process::Command as StdCommand;
 
     let cfg = config::load()?;
@@ -321,7 +331,10 @@ async fn evaluate_and_forward(
                 &[],
             );
             output::print_report_card(&report);
-            audit_details.insert(pkg.clone(), (report.findings.clone(), report.reasons.clone()));
+            audit_details.insert(
+                pkg.clone(),
+                (report.findings.clone(), report.reasons.clone()),
+            );
             decision.record(
                 pkg,
                 classification.zone,
@@ -342,29 +355,32 @@ async fn evaluate_and_forward(
         );
 
         let mut cached_report: Option<crate::core::types::RiskReport> = None;
-        if let Ok(db) = open_db() {
-            if let Ok(Some(cached)) = db.get_valid_scan_cache(pkg, &fingerprint, 900) {
-                println!(
-                    "  {} {pkg}: using cached verification result (fresh within 15m)",
-                    "[CACHE]".cyan().bold()
-                );
-                let report = crate::core::types::RiskReport {
-                    package: cached.package,
-                    zone: TrustZone::Aur,
-                    breakdown: cached.breakdown,
-                    findings: cached.findings,
-                    maintainer_changes: Vec::new(),
-                    verdict: cached.verdict,
-                    reasons: cached.reasons,
-                };
-                let _ = db.record_cache_hit(pkg);
-                cached_report = Some(report);
-            }
+        if let Ok(db) = open_db()
+            && let Ok(Some(cached)) = db.get_valid_scan_cache(pkg, &fingerprint, 900)
+        {
+            println!(
+                "  {} {pkg}: using cached verification result (fresh within 15m)",
+                "[CACHE]".cyan().bold()
+            );
+            let report = crate::core::types::RiskReport {
+                package: cached.package,
+                zone: TrustZone::Aur,
+                breakdown: cached.breakdown,
+                findings: cached.findings,
+                maintainer_changes: Vec::new(),
+                verdict: cached.verdict,
+                reasons: cached.reasons,
+            };
+            let _ = db.record_cache_hit(pkg);
+            cached_report = Some(report);
         }
 
         if let Some(report) = cached_report {
             output::print_report_card(&report);
-            audit_details.insert(pkg.clone(), (report.findings.clone(), report.reasons.clone()));
+            audit_details.insert(
+                pkg.clone(),
+                (report.findings.clone(), report.reasons.clone()),
+            );
             decision.record(
                 pkg,
                 TrustZone::Aur,
@@ -394,10 +410,10 @@ async fn evaluate_and_forward(
 
         let mut maintainer_changes = Vec::new();
         if let Ok(db) = open_db() {
-            if let Ok(Some(prev)) = db.latest_snapshot(&snapshot.package_name) {
-                if let Some(change) = crate::core::maintainer::detect_change(&prev, &snapshot) {
-                    maintainer_changes.push(change);
-                }
+            if let Ok(Some(prev)) = db.latest_snapshot(&snapshot.package_name)
+                && let Some(change) = crate::core::maintainer::detect_change(&prev, &snapshot)
+            {
+                maintainer_changes.push(change);
             }
             let _ = db.save_snapshot(&snapshot);
         }
@@ -423,10 +439,20 @@ async fn evaluate_and_forward(
                 timestamp: chrono::Utc::now().timestamp(),
             };
             let _ = db.save_scan_cache(&cache_entry);
+            let _ = db.record_decision(&crate::storage::models::DecisionRecord {
+                package: pkg.clone(),
+                score: report.score(),
+                verdict: report.verdict,
+                reasons: report.reasons.clone(),
+                timestamp: chrono::Utc::now().timestamp(),
+            });
         }
 
         output::print_report_card(&report);
-        audit_details.insert(pkg.clone(), (report.findings.clone(), report.reasons.clone()));
+        audit_details.insert(
+            pkg.clone(),
+            (report.findings.clone(), report.reasons.clone()),
+        );
         decision.record(
             pkg,
             TrustZone::Aur,
@@ -463,10 +489,7 @@ async fn evaluate_and_forward(
             println!("  {} {pkg} BLOCKED: {reason}", "[X]".red());
         }
 
-        let mut blocked: Vec<String> = to_resolve
-            .iter()
-            .map(|(pkg, _)| pkg.clone())
-            .collect();
+        let mut blocked: Vec<String> = to_resolve.iter().map(|(pkg, _)| pkg.clone()).collect();
         let should_skip = match mode {
             crate::interceptor::GatewayMode::AutoSkip => true,
             crate::interceptor::GatewayMode::Interactive
@@ -484,7 +507,9 @@ async fn evaluate_and_forward(
                             writeln!(
                                 out,
                                 "\n{}",
-                                "── Detailed Audit Findings ──────────────────────────────────".cyan().bold()
+                                "── Detailed Audit Findings ──────────────────────────────────"
+                                    .cyan()
+                                    .bold()
                             )?;
                             for (pkg, reason) in &to_resolve {
                                 if blocked.contains(pkg) {
@@ -509,24 +534,108 @@ async fn evaluate_and_forward(
                             }
                             writeln!(out)?;
                         }
-                        Some(crate::cli::prompt::GatewayChoice::Allow) => {
-                            match crate::cli::prompt::select_package(
-                                &mut out, &mut input, &blocked,
-                            )? {
-                                Some(idx) => {
-                                    let pkg = blocked[idx].clone();
-                                    writeln!(
-                                        out,
-                                        "  [!] Allowing {pkg} bypasses security checks for this run."
-                                    )?;
-                                    if crate::cli::prompt::confirm(&mut out, &mut input)? {
-                                        writeln!(out, "  {} {pkg}: allowed once", "[OK]".green())?;
-                                        blocked.retain(|p| p != &pkg);
-                                    } else {
-                                        writeln!(out, "  Cancelled.")?;
-                                    }
+                        Some(crate::cli::prompt::GatewayChoice::ExplainAi) => {
+                            let db_opt = open_db().ok();
+                            let pkgs_to_explain: Vec<String> = if blocked.len() > 1 {
+                                writeln!(out, "\n  Select package(s) for AI triage:")?;
+                                for (i, p) in blocked.iter().enumerate() {
+                                    writeln!(out, "  [{}] {}", i + 1, p)?;
                                 }
-                                None => writeln!(out, "  Invalid selection.")?,
+                                writeln!(
+                                    out,
+                                    "  [a] All blocked packages (or range like 1-4, or 1,3,5)"
+                                )?;
+                                write!(out, "  Selection: ")?;
+                                out.flush()?;
+                                let mut choice_line = String::new();
+                                input.read_line(&mut choice_line)?;
+                                let indices = crate::cli::prompt::parse_package_selection(
+                                    &choice_line,
+                                    blocked.len(),
+                                );
+                                if indices.is_empty() {
+                                    writeln!(out, "  Invalid selection.")?;
+                                    Vec::new()
+                                } else {
+                                    indices.iter().map(|&idx| blocked[idx].clone()).collect()
+                                }
+                            } else {
+                                blocked.clone()
+                            };
+
+                            for pkg in pkgs_to_explain {
+                                writeln!(
+                                    out,
+                                    "  [*] Querying AI triage for {} at {} ({})...",
+                                    pkg.bold(),
+                                    cfg.ai.base_url,
+                                    cfg.ai.model
+                                )?;
+                                out.flush()?;
+
+                                let empty_findings = Vec::new();
+                                let empty_reasons = Vec::new();
+                                let (findings, reasons) = audit_details
+                                    .get(&pkg)
+                                    .map(|(f, r)| (f, r))
+                                    .unwrap_or((&empty_findings, &empty_reasons));
+
+                                if let Some(ref db) = db_opt {
+                                    match crate::core::ai::triage_package_cached(
+                                        db, &cfg.ai, &pkg, findings, reasons, false,
+                                    )
+                                    .await
+                                    {
+                                        Ok(report) => {
+                                            let _ = output::render_ai_triage_to(&mut out, &report);
+                                        }
+                                        Err(err) => {
+                                            writeln!(
+                                                out,
+                                                "  {} AI triage failed for {}: {}",
+                                                "[!]".yellow().bold(),
+                                                pkg,
+                                                err
+                                            )?;
+                                        }
+                                    }
+                                } else {
+                                    writeln!(out, "  [!] Cannot open database for caching.")?;
+                                }
+                            }
+                        }
+                        Some(crate::cli::prompt::GatewayChoice::Allow) => {
+                            let selected_indices = crate::cli::prompt::select_packages(
+                                &mut out, &mut input, &blocked,
+                            )?;
+                            if selected_indices.is_empty() {
+                                writeln!(out, "  Invalid or empty selection.")?;
+                            } else {
+                                let selected_names: Vec<String> = selected_indices
+                                    .iter()
+                                    .map(|&idx| blocked[idx].clone())
+                                    .collect();
+                                writeln!(
+                                    out,
+                                    "  [!] Allowing [{}] bypasses security checks for this run.",
+                                    selected_names.join(", ")
+                                )?;
+                                let prompt_msg = if selected_names.len() == 1 {
+                                    format!("Allow {} once?", selected_names[0])
+                                } else {
+                                    format!(
+                                        "Allow {} selected packages once?",
+                                        selected_names.len()
+                                    )
+                                };
+                                if crate::cli::prompt::confirm(&mut out, &mut input, &prompt_msg)? {
+                                    for pkg in &selected_names {
+                                        writeln!(out, "  {} {pkg}: allowed once", "[OK]".green())?;
+                                    }
+                                    blocked.retain(|p| !selected_names.contains(p));
+                                } else {
+                                    writeln!(out, "  Cancelled.")?;
+                                }
                             }
                         }
                         Some(crate::cli::prompt::GatewayChoice::Abort) | None => break false,
@@ -543,13 +652,20 @@ async fn evaluate_and_forward(
         println!("  [!] Skipping blocked package(s): {}", blocked.join(", "));
     }
 
-    // Phase 3 Sandbox Wrapper: Delegate makepkg execution through yaru sandbox
-    // via paru's built-in --makepkg flag if backend is available and not already set.
+    // Phase 3 Selective Sandbox Wrapper: Delegate makepkg execution through yaru sandbox
+    // via paru's built-in --makepkg flag ONLY when there are packages with elevated risk.
+    let any_package_needs_sandbox = packages.iter().any(|pkg| {
+        decision.warnings.iter().any(|(p, _)| p == pkg)
+            || decision.blocked_packages.iter().any(|(p, _)| p == pkg)
+            || allowed_packages.contains(pkg)
+    });
+
     let wrapper_path = dirs::home_dir()
         .map(|h| h.join(".local/bin/yaru-makepkg"))
         .unwrap_or_else(|| PathBuf::from("/usr/local/bin/yaru-makepkg"));
 
-    if wrapper_path.is_file()
+    if any_package_needs_sandbox
+        && wrapper_path.is_file()
         && crate::sandbox::Sandbox::backend_available()
         && !final_args
             .iter()
@@ -574,7 +690,11 @@ async fn evaluate_and_forward(
 
 /// Executes a command inside the bubblewrap sandbox using the configured
 /// network mode. Reports isolation outcome and exit code to the user.
-async fn sandbox_run(dir: &str, command: &[String]) -> Result<()> {
+async fn sandbox_run(
+    dir: &str,
+    network_override: Option<crate::config::NetworkMode>,
+    command: &[String],
+) -> Result<()> {
     use crate::sandbox::{Sandbox, SandboxResult};
 
     if !Path::new(dir).is_dir() {
@@ -585,20 +705,36 @@ async fn sandbox_run(dir: &str, command: &[String]) -> Result<()> {
     }
 
     let cfg = config::load()?;
-    let sb = Sandbox::new(cfg.sandbox.network_mode, dir);
+    let is_source_retrieval = command.iter().any(|arg| {
+        arg == "--verifysource"
+            || arg == "--nobuild"
+            || arg == "-o"
+            || arg == "-g"
+            || arg == "--geninteg"
+    });
+
+    // If source retrieval is explicitly invoked without an override, allow network in Audit mode
+    // because downloading declared sources requires upstream connectivity.
+    let effective_network = network_override.unwrap_or(if is_source_retrieval {
+        crate::config::NetworkMode::Audit
+    } else {
+        cfg.sandbox.network_mode
+    });
+
+    let sb = Sandbox::new(effective_network, dir);
     let argv: Vec<&str> = command.iter().map(|s| s.as_str()).collect();
 
-    println!("  Sandbox mode : {:?}", cfg.sandbox.network_mode);
-    println!("  Workdir      : {dir}");
-    println!("  Command      : {}", argv.join(" "));
-    println!();
+    eprintln!("  Sandbox mode : {:?}", effective_network);
+    eprintln!("  Workdir      : {dir}");
+    eprintln!("  Command      : {}", argv.join(" "));
+    eprintln!();
 
     let r: SandboxResult = sb.run(&argv);
     if !r.stdout.is_empty() {
-        println!("{}", r.stdout);
+        print!("{}", r.stdout);
     }
     if !r.stderr.is_empty() {
-        eprintln!("{}", r.stderr.red());
+        eprint!("{}", r.stderr.red());
     }
 
     // Phase 4: Behavioral IDS. The sandbox output is the observable evidence of
@@ -610,37 +746,37 @@ async fn sandbox_run(dir: &str, command: &[String]) -> Result<()> {
     }
 
     if behavior.suspicious {
-        println!(
+        eprintln!(
             "\n{}",
             "── Behavior Findings ──────────────────────────────────────────".yellow()
         );
         for f in &behavior.findings {
-            println!(
+            eprintln!(
                 "  [{}] line {} · {}",
                 f.severity.label(),
                 f.line,
                 f.title.bold()
             );
-            println!("             {}", f.excerpt.dimmed());
+            eprintln!("             {}", f.excerpt.dimmed());
         }
-        println!(
+        eprintln!(
             "\n  Behavior score : {}/100  (evidence logged to {})",
             behavior.score,
             events_path.display()
         );
-        println!(
+        eprintln!(
             "  {} dynamic risk raised — build behavior does not match declared sources",
             "[!]".yellow()
         );
     }
 
     if r.success && !behavior.suspicious {
-        println!("\n  {} sandboxed command exited cleanly", "[OK]".green());
+        eprintln!("\n  {} sandboxed command exited cleanly", "[OK]".green());
         Ok(())
     } else if r.success {
         anyhow::bail!("sandboxed command exited cleanly but behavior was suspicious")
     } else {
-        println!(
+        eprintln!(
             "\n  {} sandboxed command FAILED (exit: {:?})",
             "[X]".red(),
             r.exit_code
@@ -886,10 +1022,13 @@ async fn fetch_aur_snapshot(package: &str, url_path: Option<&str>) -> Result<Pat
     Ok(if nested.is_dir() { nested } else { dir })
 }
 
-fn explain(package: &str) -> Result<()> {
+async fn explain(package: &str, ai: bool, refresh: bool) -> Result<()> {
     let db = open_db()?;
     let decisions = db.list_decisions(package)?;
-    match decisions.last() {
+    let cfg = config::load()?;
+    let latest_decision = decisions.last();
+
+    match latest_decision {
         Some(d) => {
             println!(
                 "\n  {} — score {}/100 — {}",
@@ -903,7 +1042,86 @@ fn explain(package: &str) -> Result<()> {
             println!("  No recorded decision for '{package}'. Run `yaru inspect {package}` first.")
         }
     }
+
+    if ai {
+        let reasons = latest_decision
+            .map(|d| d.reasons.clone())
+            .unwrap_or_default();
+
+        // Retrieve findings from latest snapshot or quick inspect if available
+        let mut findings = Vec::new();
+        let aur = AurClient::new();
+        if let Ok(classification) = crate::core::classifier::classify(package, &aur).await
+            && classification.zone == TrustZone::Aur
+            && let Ok(dir) = fetch_aur_snapshot(package, classification.url_path.as_deref()).await
+        {
+            let rules = crate::core::analyzer::RuleSet::builtin();
+            if let Ok(analysis) = crate::core::analyzer::analyze_pkgbuild_dir(&dir, &rules) {
+                findings = analysis.findings;
+            }
+        }
+
+        println!(
+            "\n  [*] Querying AI triage for {} at {} ({})...",
+            package.bold(),
+            cfg.ai.base_url,
+            cfg.ai.model
+        );
+        match crate::core::ai::triage_package_cached(
+            &db, &cfg.ai, package, &findings, &reasons, refresh,
+        )
+        .await
+        {
+            Ok(report) => {
+                output::print_ai_triage(&report);
+            }
+            Err(err) => {
+                println!(
+                    "  {} AI triage failed for {}: {}",
+                    "[!]".yellow().bold(),
+                    package,
+                    err
+                );
+            }
+        }
+    }
+
     Ok(())
+}
+
+async fn should_sandbox(package: &str, dir: Option<&str>) -> Result<()> {
+    use crate::core::types::Verdict;
+
+    let cfg = config::load()?;
+    let threshold = cfg.policy.allow_below;
+
+    if let Ok(db) = open_db()
+        && let Ok(decisions) = db.list_decisions(package)
+        && let Some(latest) = decisions.last()
+    {
+        if latest.score >= threshold || latest.verdict != Verdict::Allow {
+            std::process::exit(0);
+        } else {
+            std::process::exit(1);
+        }
+    }
+
+    if let Some(d) = dir {
+        let p = Path::new(d);
+        if p.join("PKGBUILD").is_file() {
+            let policy = crate::core::policy::PolicyEngine::with_whitelist(cfg.whitelisted_rules);
+            if let Ok((report, _)) = analyze_dir(p, package, None, &policy, false).await {
+                if report.score() >= threshold || report.verdict != Verdict::Allow {
+                    std::process::exit(0);
+                } else {
+                    std::process::exit(1);
+                }
+            }
+        }
+    }
+
+    // Default: clean package does not require sandbox
+    std::process::exit(1);
 }
 
 fn history(package: &str) -> Result<()> {

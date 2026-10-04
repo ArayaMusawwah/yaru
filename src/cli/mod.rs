@@ -25,7 +25,15 @@ pub enum Command {
     /// Deep analysis: full findings list with evidence
     Audit { package: String },
     /// Explain the last or current decision for a package
-    Explain { package: String },
+    Explain {
+        package: String,
+        /// Request AI triage assistance to explain security findings
+        #[arg(long)]
+        ai: bool,
+        /// Bypass cached AI triage response and query AI server again
+        #[arg(long)]
+        refresh: bool,
+    },
     /// Show snapshot and maintainer history
     History { package: String },
     /// Show reputation/trust view of a package
@@ -42,9 +50,19 @@ pub enum Command {
     },
     /// Inspect a local PKGBUILD directory
     InspectLocal { dir: String },
+    /// Check if a package requires sandboxed build based on risk policy
+    ShouldSandbox {
+        package: String,
+        /// Optional directory of PKGBUILD if not in database
+        #[arg(long)]
+        dir: Option<String>,
+    },
     /// Run a command inside an isolated bwrap sandbox for a PKGBUILD directory
     Sandbox {
         dir: String,
+        /// Sandbox network mode override (strict, source-allowlist, audit)
+        #[arg(long)]
+        network: Option<crate::config::NetworkMode>,
         /// Command to execute inside the sandbox (defaults to /usr/bin/true)
         #[arg(default_value = "/usr/bin/true", num_args = 1.., trailing_var_arg = true)]
         command: Vec<String>,

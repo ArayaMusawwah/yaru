@@ -124,7 +124,17 @@ impl Database {
                 timestamp INTEGER NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_scan_cache_hits
-                ON scan_cache_hits(timestamp);",
+                ON scan_cache_hits(timestamp);
+            CREATE TABLE IF NOT EXISTS ai_triage_cache (
+                package_name TEXT NOT NULL,
+                fingerprint TEXT NOT NULL,
+                model TEXT NOT NULL,
+                report TEXT NOT NULL,
+                timestamp INTEGER NOT NULL,
+                PRIMARY KEY (package_name, fingerprint, model)
+            );
+            CREATE INDEX IF NOT EXISTS idx_ai_triage_cache
+                ON ai_triage_cache(package_name, fingerprint, model, timestamp);",
         )?;
         Ok(())
     }
@@ -261,6 +271,47 @@ impl Database {
                         timestamp: row.get(7)?,
                     })
                 },
+            )
+            .optional()
+            .map_err(StorageError::from)
+    }
+
+    pub fn save_ai_triage(
+        &self,
+        package: &str,
+        fingerprint: &str,
+        model: &str,
+        report_json: &str,
+    ) -> Result<(), StorageError> {
+        let now = chrono::Utc::now().timestamp();
+        self.conn.execute(
+            "INSERT INTO ai_triage_cache (package_name, fingerprint, model, report, timestamp)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(package_name, fingerprint, model) DO UPDATE SET
+                report = excluded.report,
+                timestamp = excluded.timestamp",
+            params![package, fingerprint, model, report_json, now],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_valid_ai_triage(
+        &self,
+        package: &str,
+        fingerprint: &str,
+        model: &str,
+        max_age_seconds: i64,
+    ) -> Result<Option<String>, StorageError> {
+        let min_ts = chrono::Utc::now()
+            .timestamp()
+            .saturating_sub(max_age_seconds);
+        self.conn
+            .query_row(
+                "SELECT report FROM ai_triage_cache
+                 WHERE package_name = ?1 AND fingerprint = ?2 AND model = ?3 AND timestamp >= ?4
+                 ORDER BY timestamp DESC LIMIT 1",
+                params![package, fingerprint, model, min_ts],
+                |row| row.get(0),
             )
             .optional()
             .map_err(StorageError::from)
@@ -782,5 +833,30 @@ mod tests {
 
         let count = db.count_cache_hits(now - 100, now).unwrap();
         assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn ai_triage_cache_hit_and_expiration() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&dir.path().join("yaru_test.db")).unwrap();
+
+        let pkg = "winpodx";
+        let fp = "fp_hash_123";
+        let model = "1.beeg-brain";
+        let payload = r#"{"verdict":"Suspicious","summary":"test summary"}"#;
+
+        db.save_ai_triage(pkg, fp, model, payload).unwrap();
+
+        // Cache hit within 3600s
+        let cached = db.get_valid_ai_triage(pkg, fp, model, 3600).unwrap();
+        assert_eq!(cached.as_deref(), Some(payload));
+
+        // Cache miss on different fingerprint
+        let miss_fp = db.get_valid_ai_triage(pkg, "fp_diff", model, 3600).unwrap();
+        assert_eq!(miss_fp, None);
+
+        // Cache miss on expired TTL (0s max age)
+        let expired = db.get_valid_ai_triage(pkg, fp, model, -1).unwrap();
+        assert_eq!(expired, None);
     }
 }

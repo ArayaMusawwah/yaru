@@ -138,3 +138,96 @@ pub fn print_source_integrity(findings: &[Finding]) {
         println!("             {}", f.excerpt.trim().dimmed());
     }
 }
+
+pub fn render_ai_triage_to<W: std::io::Write>(
+    writer: &mut W,
+    report: &crate::core::ai::AiTriageReport,
+) -> std::io::Result<()> {
+    use crate::core::ai::AiVerdict;
+
+    let cached_badge = if report.cached {
+        format!(" {}", "[CACHED]".cyan().bold())
+    } else {
+        String::new()
+    };
+
+    let verdict_badge = match report.verdict {
+        AiVerdict::Benign => "[BENIGN]      ".green().bold(),
+        AiVerdict::Suspicious => "[SUSPICIOUS]  ".yellow().bold(),
+        AiVerdict::Malicious => "[MALICIOUS]   ".red().bold(),
+        AiVerdict::Inconclusive => "[INCONCLUSIVE]".cyan().bold(),
+    };
+
+    writeln!(
+        writer,
+        "\n{}",
+        "── AI Security Triage ────────────────────────────────────────"
+            .bright_magenta()
+            .bold()
+    )?;
+    writeln!(
+        writer,
+        "  Package       : {}{}",
+        report.package.bold().white(),
+        cached_badge
+    )?;
+    writeln!(
+        writer,
+        "  Verdict       : {} (Confidence: {})",
+        verdict_badge,
+        report.confidence.bold()
+    )?;
+    writeln!(writer, "  Summary       : {}", report.summary.trim())?;
+
+    if !report.risk_analysis.is_empty() {
+        writeln!(writer, "  Risk Analysis :")?;
+        for item in &report.risk_analysis {
+            writeln!(writer, "    • {}", item.trim())?;
+        }
+    }
+
+    writeln!(
+        writer,
+        "  Recommendation: {}",
+        report.recommendation.trim().bold()
+    )?;
+    writeln!(
+        writer,
+        "{}",
+        "──────────────────────────────────────────────────────────────".dimmed()
+    )?;
+    Ok(())
+}
+
+pub fn print_ai_triage(report: &crate::core::ai::AiTriageReport) {
+    let mut out = std::io::stdout().lock();
+    let _ = render_ai_triage_to(&mut out, report);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::ai::{AiTriageReport, AiVerdict};
+
+    #[test]
+    fn renders_ai_triage_box_with_cached_tag() {
+        let report = AiTriageReport {
+            package: "winpodx".into(),
+            verdict: AiVerdict::Suspicious,
+            confidence: "High".into(),
+            summary: "Remote shell download in uninstaller.".into(),
+            risk_analysis: vec!["Curl pipe bash lacks hash verification.".into()],
+            recommendation: "Skip or inspect upstream script.".into(),
+            cached: true,
+        };
+        let mut buf = Vec::new();
+        render_ai_triage_to(&mut buf, &report).unwrap();
+        let output = String::from_utf8(buf).unwrap();
+        assert!(output.contains("AI Security Triage"));
+        assert!(output.contains("winpodx"));
+        assert!(output.contains("[CACHED]"));
+        assert!(output.contains("[SUSPICIOUS]"));
+        assert!(output.contains("Confidence: High"));
+        assert!(output.contains("Recommendation"));
+    }
+}
